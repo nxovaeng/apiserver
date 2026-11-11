@@ -22,18 +22,34 @@
 # 本地构建
 make build
 
-# 交叉编译 Linux release 产物 (bin/xray-panel-server-linux-amd64 & arm64)
+# 交叉编译 Linux release 二进制产物 (bin/xray-panel-server-linux-amd64 & arm64)
 make release
+
+# 本地一键构建并打包 tar.gz + sha256（输出到 dist/）
+make package
+# 或按需指定架构与版本：
+./scripts/build.sh --arch both --version v0.1.0 --out dist --package
 
 # 运行单元测试与接口测试
 make test
 ```
 
+## GitHub Actions 自动构建（`nxovaeng/apiserver`）
+
+仓库已内置 3 套 GitHub Actions 工作流（位于 `.github/workflows/`）：
+
+- [`ci.yml`](.github/workflows/ci.yml)：向 `main` 分支推送或提交 PR 时自动运行 `gofmt` 检查、`go vet ./...`、`go test -race -count=1 ./...`，以及 `linux/amd64` + `linux/arm64` 交叉编译校验。
+- [`release.yml`](.github/workflows/release.yml)：推送 `v*` 标签（如 `git tag v0.1.0 && git push origin v0.1.0`）或在 Actions 页面手动触发时自动运行测试、交叉打包，并发布 GitHub Release（同时附带单文件二进制、`apiserver-<version>-linux-<arch>.tar.gz` 与 `.sha256` 校验文件）。
+- [`build-flexible.yml`](.github/workflows/build-flexible.yml)：手动按需选择构建架构（`both` / `amd64-only` / `arm64-only`）、是否跑测试、是否创建 Pre-release。
+
 ## 服务器安装与运维
 
-使用一键脚本 [`scripts/install.sh`](scripts/install.sh) 部署为系统服务 `xray-panel-server.service`：
+使用一键脚本 [`scripts/install.sh`](scripts/install.sh) 部署为系统服务 `xray-panel-server.service`（未指定 `--bin` 时默认从 `nxovaeng/apiserver` 最新 Release 下载）：
 
 ```bash
+# 在线一键安装（需先在 GitHub Releases 发布过至少一个版本）
+sudo bash <(curl -Ls https://raw.githubusercontent.com/nxovaeng/apiserver/main/scripts/install.sh) install
+
 # 使用本地编译二进制安装（自动安装 Xray-core、Nginx、生成 config.yaml、创建初始 Token 并注册 systemd）
 sudo bash scripts/install.sh install --bin ./bin/xray-panel-server-linux-amd64
 

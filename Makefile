@@ -3,7 +3,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1
 BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
 LDFLAGS := -s -w -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)
 
-.PHONY: all build build-linux-amd64 build-linux-arm64 test clean
+.PHONY: all build build-linux-amd64 build-linux-arm64 release package test clean
 
 all: build
 
@@ -18,8 +18,11 @@ build-linux-arm64:
 
 release: build-linux-amd64 build-linux-arm64
 
+package:
+	./scripts/build.sh --arch both --version "$(VERSION)" --out dist --package
+
 test:
 	go test -v ./...
 
 clean:
-	rm -rf bin/
+	rm -rf bin/ dist/ release/

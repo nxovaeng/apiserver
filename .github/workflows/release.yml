@@ -1,0 +1,157 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (e.g., v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Go vet & test
+        run: |
+          go vet ./...
+          go test -count=1 ./...
+
+  build:
+    name: Build linux-${{ matrix.arch }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Resolve version
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ github.event.inputs.version }}"
+          else
+            VER="${GITHUB_REF_NAME}"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Build & Package
+        run: |
+          chmod +x scripts/build.sh
+          ./scripts/build.sh --arch "${{ matrix.arch }}" --version "${{ steps.meta.outputs.version }}" --out dist --package
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-${{ matrix.arch }}
+          path: |
+            dist/xray-panel-server-linux-${{ matrix.arch }}
+            dist/xray-panel-server-linux-${{ matrix.arch }}.sha256
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ github.event.inputs.version }}"
+          else
+            VER="${GITHUB_REF_NAME}"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "xray-panel-server-linux-*" -o -name "*.tar.gz" -o -name "*.sha256" \) -exec mv {} release/ \;
+          ls -lh release/
+
+      - name: Generate release notes
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          cat > release-notes.md << EOF
+          ## API Server (xray-panel-server) ${VERSION}
+
+          ### 构建产物
+
+          | 平台 | 压缩包 (含脚本与配置模板) | 单文件二进制 |
+          |------|---------------------------|--------------|
+          | Linux AMD64 | \`apiserver-${VERSION}-linux-amd64.tar.gz\` | \`xray-panel-server-linux-amd64\` |
+          | Linux ARM64 | \`apiserver-${VERSION}-linux-arm64.tar.gz\` | \`xray-panel-server-linux-arm64\` |
+
+          ### 校验
+
+          \`\`\`bash
+          sha256sum -c apiserver-${VERSION}-linux-amd64.tar.gz.sha256
+          \`\`\`
+
+          ### 在线一键安装
+
+          \`\`\`bash
+          sudo bash <(curl -Ls https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh) install
+          \`\`\`
+
+          ### 离线包本地安装
+
+          \`\`\`bash
+          tar xzf apiserver-${VERSION}-linux-amd64.tar.gz
+          cd apiserver-${VERSION}-linux-amd64
+          sudo bash scripts/install.sh install
+          \`\`\`
+          EOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.version }}
+          name: Release ${{ steps.meta.outputs.version }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
+          files: release/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

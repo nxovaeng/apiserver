@@ -1,4 +1,6 @@
 bin/
+dist/
+release/
 *.log
 *.db
 conf/config.yaml

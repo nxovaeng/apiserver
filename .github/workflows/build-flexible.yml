@@ -1,0 +1,159 @@
+name: Flexible Build
+
+# 手动触发，可按需选择构建架构与是否发布 Pre-release，用于功能分支测试或临时发版。
+# 正式发版请推送 v* 标签或使用 release.yml。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label (e.g., v0.1.0-dev)'
+        required: true
+        default: 'v0.1.0-dev'
+      architectures:
+        description: 'Architectures to build'
+        required: true
+        type: choice
+        options:
+          - both
+          - amd64-only
+          - arm64-only
+        default: 'both'
+      run_tests:
+        description: 'Run go vet & tests before build'
+        required: true
+        type: boolean
+        default: true
+      create_release:
+        description: 'Create GitHub Pre-release after build'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set build matrix
+        id: set-matrix
+        run: |
+          case "${{ github.event.inputs.architectures }}" in
+            both)       ARCHS="amd64 arm64" ;;
+            amd64-only) ARCHS="amd64" ;;
+            arm64-only) ARCHS="arm64" ;;
+          esac
+
+          JSON='{"arch":['
+          FIRST=true
+          for arch in $ARCHS; do
+            [ "$FIRST" = true ] && FIRST=false || JSON+=','
+            JSON+="\"$arch\""
+          done
+          JSON+=']}'
+
+          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+          echo "Build matrix: $JSON"
+
+  build:
+    name: Build linux-${{ matrix.arch }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run tests
+        if: ${{ github.event.inputs.run_tests == true || github.event.inputs.run_tests == 'true' }}
+        run: |
+          go vet ./...
+          go test -count=1 ./...
+
+      - name: Build & Package
+        run: |
+          chmod +x scripts/build.sh
+          ./scripts/build.sh --arch "${{ matrix.arch }}" --version "${{ github.event.inputs.version }}" --out dist --package
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-${{ matrix.arch }}
+          path: |
+            dist/xray-panel-server-linux-${{ matrix.arch }}
+            dist/xray-panel-server-linux-${{ matrix.arch }}.sha256
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Pre-release
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.create_release == true || github.event.inputs.create_release == 'true' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "xray-panel-server-linux-*" -o -name "*.tar.gz" -o -name "*.sha256" \) -exec mv {} release/ \;
+          ls -lh release/
+
+      - name: Generate release notes
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          cat > release-notes.md << EOF
+          ## API Server (xray-panel-server) ${VERSION}
+
+          > 由 Flexible Build 工作流构建（架构: ${{ github.event.inputs.architectures }}）
+
+          ### 在线安装
+
+          \`\`\`bash
+          sudo bash <(curl -Ls https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh) install
+          \`\`\`
+
+          ### 离线包安装
+
+          \`\`\`bash
+          tar xzf apiserver-${VERSION}-linux-amd64.tar.gz
+          cd apiserver-${VERSION}-linux-amd64
+          sudo bash scripts/install.sh install
+          \`\`\`
+          EOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: Pre-release ${{ github.event.inputs.version }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: true
+          files: release/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

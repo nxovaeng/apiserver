@@ -35,7 +35,7 @@ XRAY_ASSETS_DIR="/usr/local/share/xray"
 NGINX_CONF_DIR="/etc/nginx/conf.d"
 NGINX_STREAM_DIR="/etc/nginx/stream.d"
 
-REPO="${XRAY_PANEL_SERVER_REPO:-}"
+REPO="${XRAY_PANEL_SERVER_REPO:-nxovaeng/apiserver}"
 DEFAULT_LISTEN="127.0.0.1:8082"
 LOCAL_BIN=""
 
