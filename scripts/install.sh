@@ -80,28 +80,73 @@ detect_arch() {
 }
 
 install_dependencies() {
-    info "安装基础依赖 (curl / unzip / nginx / sqlite3)..."
+    info "安装基础依赖 (curl / unzip / nginx / sqlite3 / cron / socat)..."
     case "${OS}" in
         ubuntu|debian)
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
-            apt-get install -y -qq curl wget unzip tar nginx sqlite3 ca-certificates openssl
+            apt-get install -y -qq curl wget unzip tar nginx sqlite3 ca-certificates openssl cron socat
             ;;
         centos|rhel|rocky|almalinux|fedora)
             if command -v dnf &>/dev/null; then
-                dnf install -y -q curl wget unzip tar nginx sqlite ca-certificates openssl
+                dnf install -y -q curl wget unzip tar nginx sqlite ca-certificates openssl crontabs socat
             else
-                yum install -y -q curl wget unzip tar nginx sqlite ca-certificates openssl
+                yum install -y -q curl wget unzip tar nginx sqlite ca-certificates openssl crontabs socat
             fi
             ;;
         alpine)
-            apk add --no-cache curl wget unzip tar nginx sqlite ca-certificates openssl bash
+            apk add --no-cache curl wget unzip tar nginx sqlite ca-certificates openssl bash socat
             ;;
         *)
-            warn "未自动识别的包管理器 (${OS})，请确保已安装 curl, unzip, nginx, sqlite3"
+            warn "未自动识别的包管理器 (${OS})，请确保已安装 curl, unzip, nginx, sqlite3, cron, socat"
             ;;
     esac
     success "基础依赖检查完成"
+}
+
+install_acme() {
+    local acme_home="/root/.acme.sh"
+    if [[ -x "${acme_home}/acme.sh" ]] || command -v acme.sh &>/dev/null; then
+        info "检测到已安装 acme.sh"
+        return 0
+    fi
+
+    info "安装 acme.sh 至 ${acme_home} (用于面板内置 DNS-01 证书签发)..."
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    local archive_url="https://github.com/acmesh-official/acme.sh/archive/refs/heads/master.tar.gz"
+    if ! curl -fsSL --retry 3 -o "${tmp_dir}/acme.tar.gz" "${archive_url}"; then
+        rm -rf "${tmp_dir}"
+        warn "下载 acme.sh 失败，将在首次申请证书时再次尝试自动安装"
+        return 0
+    fi
+
+    if ! tar -xzf "${tmp_dir}/acme.tar.gz" -C "${tmp_dir}"; then
+        rm -rf "${tmp_dir}"
+        warn "解压 acme.sh 失败，将在首次申请证书时再次尝试自动安装"
+        return 0
+    fi
+
+    local installer
+    installer="$(find "${tmp_dir}" -maxdepth 2 -type f -name 'acme.sh' | head -n1)"
+    if [[ -z "${installer}" ]]; then
+        rm -rf "${tmp_dir}"
+        warn "压缩包中未找到 acme.sh 脚本"
+        return 0
+    fi
+
+    chmod +x "${installer}"
+    local extra_args=()
+    if ! command -v crontab &>/dev/null; then
+        extra_args+=(--nocron --force)
+    fi
+
+    if (cd "$(dirname "${installer}")" && HOME=/root "${installer}" --install --home "${acme_home}" ${extra_args[@]+"${extra_args[@]}"}); then
+        success "acme.sh 安装完成 (${acme_home}/acme.sh)"
+    else
+        warn "acme.sh 预安装失败，面板将在首次申请证书时重试安装"
+    fi
+    rm -rf "${tmp_dir}"
 }
 
 install_xray() {
@@ -339,6 +384,7 @@ Wants=network.target
 [Service]
 Type=simple
 User=root
+Environment=HOME=/root
 WorkingDirectory=${INSTALL_DIR}
 ExecStart=${BINARY_PATH} server --config ${CONFIG_FILE}
 Restart=on-failure
@@ -374,6 +420,7 @@ cmd_install() {
     install_dependencies
     install_xray
     prepare_nginx
+    install_acme
     install_server_binary
     write_config
     ensure_initial_token

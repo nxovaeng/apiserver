@@ -1,15 +1,20 @@
 package service
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -474,7 +479,10 @@ func (s *DomainService) IssueCertificate(ctx context.Context, req dto.IssueCertR
 
 	if email != "" {
 		regArgs := []string{"--register-account", "-m", email, "--server", caServer}
-		_, _, _ = s.acmeRunner.Run(ctx, regArgs, extraEnv)
+		regOut, regCode, regErr := s.acmeRunner.Run(ctx, regArgs, extraEnv)
+		if regErr != nil && regCode < 0 {
+			return nil, NewSystemCommandError("ACME 账户初始化失败: "+redactSecrets(regOut, secretsToRedact), regErr)
+		}
 	}
 
 	issueArgs := []string{"--issue", "--dns", dnsPlugin, "--server", caServer, "-d", baseDomain}
@@ -599,20 +607,38 @@ func redactSecrets(text string, secrets []string) string {
 	return strings.TrimSpace(res)
 }
 
+const (
+	defaultAcmeArchiveURL = "https://github.com/acmesh-official/acme.sh/archive/refs/heads/master.tar.gz"
+	maxAcmeArchiveBytes   = 64 << 20 // 64 MiB safety limit for extracted acme.sh archive
+)
+
 type execAcmeRunner struct {
-	certDirFn func() string
+	certDirFn        func() string
+	archiveURL       string
+	httpClient       *http.Client
+	skipSystemLookup bool
+	installMu        sync.Mutex
 }
 
 func (r *execAcmeRunner) Run(ctx context.Context, args []string, extraEnv []string) (string, int, error) {
-	acmeBin, err := ensureAcmeShBinary(ctx, r.certDirFn())
+	certDir := strings.TrimSpace(r.certDirFn())
+	if certDir == "" {
+		certDir = "/root/.acme.sh"
+	}
+
+	acmeBin, acmeHome, err := r.ensureBinary(ctx, certDir)
 	if err != nil {
 		return err.Error(), -1, err
 	}
 
-	homeDir := r.certDirFn()
-	fullArgs := append([]string{"--home", homeDir}, args...)
+	fullArgs := []string{"--home", acmeHome}
+	if filepath.Clean(certDir) != filepath.Clean(acmeHome) {
+		fullArgs = append(fullArgs, "--cert-home", certDir)
+	}
+	fullArgs = append(fullArgs, args...)
+
 	cmd := exec.CommandContext(ctx, acmeBin, fullArgs...)
-	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Env = envWithHome(os.Environ(), resolveHomeEnv(certDir), extraEnv)
 
 	outBytes, runErr := cmd.CombinedOutput()
 	output := string(outBytes)
@@ -626,31 +652,283 @@ func (r *execAcmeRunner) Run(ctx context.Context, args []string, extraEnv []stri
 	return output, 0, nil
 }
 
-func ensureAcmeShBinary(ctx context.Context, homeDir string) (string, error) {
-	candidates := []string{
-		filepath.Join(homeDir, "acme.sh"),
-		"/root/.acme.sh/acme.sh",
-	}
-	for _, c := range candidates {
-		if fileExists(c) {
-			return c, nil
-		}
-	}
-	if p, err := exec.LookPath("acme.sh"); err == nil {
-		return p, nil
+func (r *execAcmeRunner) ensureBinary(ctx context.Context, certDir string) (string, string, error) {
+	if acmeBin, acmeHome, ok := r.findExistingBinary(certDir); ok {
+		return acmeBin, acmeHome, nil
 	}
 
-	// Auto-install acme.sh if absent (e.g. fresh Debian server)
-	cmd := exec.CommandContext(ctx, "bash", "-c", `curl -fsSL https://get.acme.sh | sh -s -- --home "$ACME_HOME_DIR"`)
-	cmd.Env = append(os.Environ(), "ACME_HOME_DIR="+homeDir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("未安装 acme.sh 且自动安装失败: %v (%s)", err, strings.TrimSpace(string(out)))
+	r.installMu.Lock()
+	defer r.installMu.Unlock()
+
+	if acmeBin, acmeHome, ok := r.findExistingBinary(certDir); ok {
+		return acmeBin, acmeHome, nil
 	}
-	installed := filepath.Join(homeDir, "acme.sh")
-	if fileExists(installed) {
-		return installed, nil
+
+	archiveURL := strings.TrimSpace(r.archiveURL)
+	if archiveURL == "" {
+		archiveURL = defaultAcmeArchiveURL
 	}
-	return "", fmt.Errorf("未找到 acme.sh 可执行文件")
+	installed, err := installAcmeFromArchive(ctx, r.httpClient, archiveURL, certDir)
+	if err != nil {
+		return "", "", err
+	}
+	return installed, certDir, nil
+}
+
+func (r *execAcmeRunner) findExistingBinary(certDir string) (string, string, bool) {
+	var candidates []string
+	if strings.TrimSpace(certDir) != "" {
+		candidates = append(candidates, filepath.Join(certDir, "acme.sh"))
+	}
+	if !r.skipSystemLookup {
+		if userHome, err := os.UserHomeDir(); err == nil && strings.TrimSpace(userHome) != "" {
+			candidates = append(candidates, filepath.Join(userHome, ".acme.sh", "acme.sh"))
+		}
+		candidates = append(candidates, "/root/.acme.sh/acme.sh")
+	}
+
+	for _, c := range candidates {
+		if fileExists(c) {
+			return c, resolveAcmeHomeDir(c), true
+		}
+	}
+	if !r.skipSystemLookup {
+		if p, err := exec.LookPath("acme.sh"); err == nil {
+			return p, resolveAcmeHomeDir(p), true
+		}
+	}
+	return "", "", false
+}
+
+func resolveAcmeHomeDir(acmeBin string) string {
+	dir := filepath.Dir(acmeBin)
+	if dirExists(filepath.Join(dir, "dnsapi")) {
+		return dir
+	}
+	if resolved, err := filepath.EvalSymlinks(acmeBin); err == nil {
+		resolvedDir := filepath.Dir(resolved)
+		if dirExists(filepath.Join(resolvedDir, "dnsapi")) {
+			return resolvedDir
+		}
+	}
+	return dir
+}
+
+func installAcmeFromArchive(ctx context.Context, client *http.Client, archiveURL, targetHome string) (string, error) {
+	if err := os.MkdirAll(targetHome, 0755); err != nil {
+		return "", fmt.Errorf("创建 acme.sh 目录 %s 失败: %w", targetHome, err)
+	}
+
+	if client == nil {
+		client = &http.Client{Timeout: 90 * time.Second}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, archiveURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("构造 acme.sh 下载请求失败: %w", err)
+	}
+	req.Header.Set("User-Agent", "xray-panel-server")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("下载 acme.sh 失败 (%s): %w", archiveURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		snippetBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return "", fmt.Errorf("下载 acme.sh 返回 HTTP %d (%s): %s", resp.StatusCode, archiveURL, strings.TrimSpace(string(snippetBytes)))
+	}
+
+	tmpDir, err := os.MkdirTemp("", "xray-panel-acme-*")
+	if err != nil {
+		return "", fmt.Errorf("创建临时目录失败: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := extractTarGz(resp.Body, tmpDir); err != nil {
+		return "", fmt.Errorf("解压 acme.sh 压缩包失败: %w", err)
+	}
+
+	installerScript := findExtractedAcmeScript(tmpDir)
+	if installerScript == "" {
+		return "", fmt.Errorf("解压后的压缩包中未找到 acme.sh 安装脚本")
+	}
+	_ = os.Chmod(installerScript, 0755)
+
+	homeEnv := resolveHomeEnv(targetHome)
+	installEnv := envWithHome(os.Environ(), homeEnv, nil)
+
+	installArgs := []string{"--install", "--home", targetHome}
+	_, cronErr := exec.LookPath("crontab")
+	if cronErr != nil {
+		installArgs = append(installArgs, "--nocron", "--force")
+	}
+
+	runInstall := func(args []string) (string, error) {
+		cmd := exec.CommandContext(ctx, installerScript, args...)
+		cmd.Dir = filepath.Dir(installerScript)
+		cmd.Env = installEnv
+		out, runErr := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), runErr
+	}
+
+	outStr, runErr := runInstall(installArgs)
+	installed := filepath.Join(targetHome, "acme.sh")
+	if runErr != nil || !fileExists(installed) {
+		if cronErr == nil {
+			retryArgs := []string{"--install", "--home", targetHome, "--nocron", "--force"}
+			retryOut, retryErr := runInstall(retryArgs)
+			if retryErr == nil && fileExists(installed) {
+				_ = os.Chmod(installed, 0755)
+				return installed, nil
+			}
+			if retryOut != "" {
+				outStr = retryOut
+			}
+			if retryErr != nil {
+				runErr = retryErr
+			}
+		}
+		if runErr != nil {
+			return "", fmt.Errorf("自动安装 acme.sh 失败: %v (%s)", runErr, outStr)
+		}
+		return "", fmt.Errorf("未找到 acme.sh 可执行文件 (%s): %s", installed, outStr)
+	}
+
+	_ = os.Chmod(installed, 0755)
+	return installed, nil
+}
+
+func extractTarGz(r io.Reader, destDir string) error {
+	gzr, err := gzip.NewReader(io.LimitReader(r, maxAcmeArchiveBytes))
+	if err != nil {
+		return err
+	}
+	defer gzr.Close()
+
+	cleanDest := filepath.Clean(destDir)
+	tr := tar.NewReader(gzr)
+	var totalWritten int64
+
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		cleanRel := filepath.Clean(hdr.Name)
+		if cleanRel == "." || cleanRel == string(os.PathSeparator) {
+			continue
+		}
+		if filepath.IsAbs(cleanRel) || cleanRel == ".." || strings.HasPrefix(cleanRel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("非法归档路径: %s", hdr.Name)
+		}
+
+		targetPath := filepath.Join(cleanDest, cleanRel)
+		if !strings.HasPrefix(targetPath, cleanDest+string(os.PathSeparator)) {
+			return fmt.Errorf("非法解压目标路径: %s", targetPath)
+		}
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			mode := os.FileMode(hdr.Mode) & os.ModePerm
+			if mode == 0 {
+				mode = 0755
+			}
+			if err := os.MkdirAll(targetPath, mode); err != nil {
+				return err
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if hdr.Size < 0 || totalWritten+hdr.Size > maxAcmeArchiveBytes {
+				return fmt.Errorf("归档解压体积超过安全限制")
+			}
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+				return err
+			}
+			mode := os.FileMode(hdr.Mode) & os.ModePerm
+			if mode == 0 {
+				mode = 0644
+			}
+			f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			if err != nil {
+				return err
+			}
+			written, copyErr := io.CopyN(f, tr, hdr.Size)
+			closeErr := f.Close()
+			if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			totalWritten += written
+		case tar.TypeXHeader, tar.TypeXGlobalHeader:
+			continue
+		}
+	}
+	return nil
+}
+
+func findExtractedAcmeScript(rootDir string) string {
+	direct := filepath.Join(rootDir, "acme.sh")
+	if fileExists(direct) {
+		return direct
+	}
+	entries, err := os.ReadDir(rootDir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			candidate := filepath.Join(rootDir, entry.Name(), "acme.sh")
+			if fileExists(candidate) {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func resolveHomeEnv(certDir string) string {
+	if h := strings.TrimSpace(os.Getenv("HOME")); h != "" {
+		return h
+	}
+	if h, err := os.UserHomeDir(); err == nil && strings.TrimSpace(h) != "" {
+		return h
+	}
+	if os.Geteuid() == 0 {
+		return "/root"
+	}
+	if parent := filepath.Dir(filepath.Clean(certDir)); parent != "" && parent != "." {
+		return parent
+	}
+	return "/tmp"
+}
+
+func envWithHome(baseEnv []string, homeVal string, extraEnv []string) []string {
+	res := make([]string, 0, len(baseEnv)+len(extraEnv)+1)
+	hasHome := false
+	for _, entry := range baseEnv {
+		if strings.HasPrefix(entry, "HOME=") {
+			if strings.TrimSpace(strings.TrimPrefix(entry, "HOME=")) == "" {
+				res = append(res, "HOME="+homeVal)
+			} else {
+				res = append(res, entry)
+			}
+			hasHome = true
+			continue
+		}
+		res = append(res, entry)
+	}
+	if !hasHome {
+		res = append(res, "HOME="+homeVal)
+	}
+	res = append(res, extraEnv...)
+	return res
 }
 
 // findMatchingDomainCert locates an enabled direct/cdn Domain with existing cert+key files matching host
@@ -823,6 +1101,14 @@ func fileExists(path string) bool {
 		return false
 	}
 	return !info.IsDir()
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
 }
 
 func toDomainDTO(d models.Domain) dto.DomainDTO {
