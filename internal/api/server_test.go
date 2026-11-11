@@ -231,6 +231,24 @@ func TestEndToEndRESTAndDynamicSubscription(t *testing.T) {
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "socks-in") {
 		t.Fatalf("GET /api/v1/xray/config unexpected: %d %s", rec.Code, rec.Body.String())
 	}
+	var cfgEnv dto.Envelope[dto.XrayConfigResponse]
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfgEnv); err != nil {
+		t.Fatal(err)
+	}
+	// Preview is redacted: no full user UUID, no WireGuard private key.
+	if strings.Contains(cfgEnv.Data.Raw, user.UUID) {
+		t.Fatalf("GET /api/v1/xray/config leaks full user UUID")
+	}
+	if !strings.Contains(cfgEnv.Data.Raw, user.UUID[:8]+"****") {
+		t.Fatalf("GET /api/v1/xray/config does not mask client id")
+	}
+	if strings.Contains(cfgEnv.Data.Raw, priv) {
+		t.Fatalf("GET /api/v1/xray/config leaks WireGuard secretKey")
+	}
+	// Nothing applied yet: dirty with empty applied hash.
+	if !cfgEnv.Data.Dirty || cfgEnv.Data.AppliedHash != "" || cfgEnv.Data.CurrentHash == "" {
+		t.Fatalf("unexpected xray config dirty state: %+v", cfgEnv.Data)
+	}
 
 	// 6. Test public subscription formats under default /d/{sub_path}
 	rec = doRequest(t, h, http.MethodGet, "/d/"+user.SubPath, "", nil, "")

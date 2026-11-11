@@ -658,15 +658,20 @@ type XrayRestartResponse struct {
 }
 
 type XrayConfigResponse struct {
-	Config map[string]interface{} `json:"config"`
-	Raw    string                 `json:"raw"`
+	Config      map[string]interface{} `json:"config"`
+	Raw         string                 `json:"raw"`
+	CurrentHash string                 `json:"current_hash"`
+	AppliedHash string                 `json:"applied_hash"`
+	Dirty       bool                   `json:"dirty"`
 }
 
 type XrayApplyResponse struct {
-	Applied   bool   `json:"applied"`
-	Method    string `json:"method"`
-	ConfigLen int    `json:"config_len"`
-	Message   string `json:"message"`
+	Applied   bool     `json:"applied"`
+	Method    string   `json:"method"`
+	ConfigLen int      `json:"config_len"`
+	Changed   bool     `json:"changed"`
+	Warnings  []string `json:"warnings,omitempty"`
+	Message   string   `json:"message"`
 }
 
 type SettingsDTO struct {

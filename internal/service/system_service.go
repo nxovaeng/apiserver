@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -448,10 +450,18 @@ func (s *SystemService) GenerateXrayConfig() (*xray.Config, []byte, error) {
 	var outbounds []models.Outbound
 	var rules []models.RoutingRule
 
-	s.db.Where("enabled = ?", true).Find(&users)
-	s.db.Preload("Domain").Where("enabled = ?", true).Find(&inbounds)
-	s.db.Where("enabled = ?", true).Find(&outbounds)
-	s.db.Where("enabled = ?", true).Order("priority ASC").Find(&rules)
+	if err := s.db.Where("enabled = ?", true).Find(&users).Error; err != nil {
+		return nil, nil, NewInternalError("Failed to load users for Xray config", err)
+	}
+	if err := s.db.Preload("Domain").Where("enabled = ?", true).Find(&inbounds).Error; err != nil {
+		return nil, nil, NewInternalError("Failed to load inbounds for Xray config", err)
+	}
+	if err := s.db.Where("enabled = ?", true).Find(&outbounds).Error; err != nil {
+		return nil, nil, NewInternalError("Failed to load outbounds for Xray config", err)
+	}
+	if err := s.db.Where("enabled = ?", true).Order("priority ASC").Find(&rules).Error; err != nil {
+		return nil, nil, NewInternalError("Failed to load routing rules for Xray config", err)
+	}
 
 	apiPort := 10085
 	socketDir := "/dev/shm"
@@ -497,13 +507,141 @@ func (s *SystemService) GetXrayConfigPreview() (*dto.XrayConfigResponse, error) 
 	if err := json.Unmarshal(raw, &asMap); err != nil {
 		return nil, NewInternalError("Failed to decode Xray config JSON", err)
 	}
+	// 预览先脱敏再返回：config 与 raw 均来自脱敏后的 JSON，见
+	// redactXrayConfigForPreview 的规则注释。
+	redacted := redactXrayConfigForPreview(asMap)
+	redactedRaw, err := json.MarshalIndent(redacted, "", "  ")
+	if err != nil {
+		return nil, NewInternalError("Failed to serialize redacted Xray config", err)
+	}
+	currentHash := sha256Hex(raw)
+	appliedHash := GetAppliedConfigHash(s.db)
 	return &dto.XrayConfigResponse{
-		Config: asMap,
-		Raw:    string(raw),
+		Config:      redacted,
+		Raw:         string(redactedRaw),
+		CurrentHash: currentHash,
+		AppliedHash: appliedHash,
+		// applied 为空且 current 非空时也算 dirty（从未成功应用过）。
+		Dirty: currentHash != appliedHash,
 	}, nil
 }
 
-func (s *SystemService) ApplyXrayConfig(hot bool) (*dto.XrayApplyResponse, error) {
+// appliedConfigHashKey 是记录上次成功应用的 Xray 配置哈希的 Setting key。
+// 与 models/setting.go 的 GetXrayLogLevel 等 helper 同模式：用 Setting 表存。
+const appliedConfigHashKey = "xray_applied_config_hash"
+
+// GetAppliedConfigHash returns the SHA256 of the last successfully applied
+// Xray config, or "" if nothing has been applied yet.
+func GetAppliedConfigHash(db *gorm.DB) string {
+	return models.GetSettingValue(db, appliedConfigHashKey, "")
+}
+
+// SetAppliedConfigHash records hash as the last successfully applied config.
+// Only call after a full successful apply; failed applies must not update it.
+func SetAppliedConfigHash(db *gorm.DB, hash string) error {
+	var setting models.Setting
+	if err := db.Where("key = ?", appliedConfigHashKey).First(&setting).Error; err == nil {
+		setting.Value = hash
+		if err := db.Save(&setting).Error; err != nil {
+			return NewInternalError("Failed to update setting "+appliedConfigHashKey, err)
+		}
+		return nil
+	}
+	if err := db.Create(&models.Setting{
+		Key:    appliedConfigHashKey,
+		Value:  hash,
+		Type:   "string",
+		Remark: "SHA256 of last successfully applied Xray config",
+	}).Error; err != nil {
+		return NewInternalError("Failed to create setting "+appliedConfigHashKey, err)
+	}
+	return nil
+}
+
+// sha256Hex returns the lowercase hex SHA256 of data.
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// redactXrayConfigForPreview 对生成的 Xray 配置做脱敏，供 GET /xray/config
+// 预览返回。脱敏规则：
+//
+//  1. 递归遍历：key 不区分大小写包含 secret / private / password / passwd /
+//     token 时，值一律替换为 "***"（无论值是字符串还是其它类型）。这覆盖
+//     WireGuard 的 secretKey、私钥等字段。
+//  2. VLESS/Trojan 客户端列表（inbounds[].settings.clients 中的对象）：
+//     "id" 字段只保留前 8 个字符，其余用 "****" 代替（如
+//     "550e8400****"）；长度不超过 8 个字符的 id 整体替换为 "****"。
+//     其余位置的 "id" 不动。
+//  3. 其余字段原样返回。
+//
+// 注意：函数不修改入参，返回一份新的 map；Raw 字段同步用脱敏后的 JSON
+// 重新序列化，调用方拿到的 config 与 raw 均不含明文密钥与完整用户 UUID。
+func redactXrayConfigForPreview(cfg map[string]interface{}) map[string]interface{} {
+	var walk func(v interface{}, inClients bool) interface{}
+	walk = func(v interface{}, inClients bool) interface{} {
+		switch t := v.(type) {
+		case map[string]interface{}:
+			out := make(map[string]interface{}, len(t))
+			for k, val := range t {
+				if isSensitiveConfigKey(k) {
+					out[k] = "***"
+					continue
+				}
+				if inClients && strings.EqualFold(k, "id") {
+					out[k] = maskClientID(val)
+					continue
+				}
+				// 入站 clients 与出站 vnext[].users[] 里的 id 都是账号凭证，同样掩码。
+				childInClients := inClients || strings.EqualFold(k, "clients") || strings.EqualFold(k, "users")
+				out[k] = walk(val, childInClients)
+			}
+			return out
+		case []interface{}:
+			out := make([]interface{}, len(t))
+			for i, e := range t {
+				out[i] = walk(e, inClients)
+			}
+			return out
+		default:
+			return v
+		}
+	}
+	return walk(cfg, false).(map[string]interface{})
+}
+
+// isSensitiveConfigKey reports whether a config key holds a secret value.
+func isSensitiveConfigKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, sub := range []string{"secret", "private", "password", "passwd", "token"} {
+		if strings.Contains(lower, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// maskClientID keeps only the first 8 characters of a client id, replacing
+// the rest with "****". Non-string or short values become "****".
+func maskClientID(v interface{}) interface{} {
+	s, ok := v.(string)
+	if !ok {
+		return "****"
+	}
+	r := []rune(s)
+	if len(r) <= 8 {
+		return "****"
+	}
+	return string(r[:8]) + "****"
+}
+
+// ApplyXrayConfig generates the Xray config from DB state and applies it on
+// demand: if the generated config is identical to both the on-disk file and
+// the last successfully applied config, nothing is written or restarted.
+// Otherwise it validates the new config, writes it atomically and restarts
+// Xray. There is no hot reload: every real change restarts Xray.
+func (s *SystemService) ApplyXrayConfig() (*dto.XrayApplyResponse, error) {
 	_, configJSON, err := s.GenerateXrayConfig()
 	if err != nil {
 		return nil, err
@@ -520,17 +658,49 @@ func (s *SystemService) ApplyXrayConfig(hot bool) (*dto.XrayApplyResponse, error
 		}
 	}
 
+	currentHash := sha256Hex(configJSON)
+	appliedHash := GetAppliedConfigHash(s.db)
+
+	// 脏检查：磁盘内容与上次成功应用的哈希都与当前一致时直接返回，不写盘、
+	// 不校验、不重启、不碰 nginx。appliedHash 也要比对：上次应用若在重启
+	// 环节失败，磁盘已是新配置但 xray 仍跑着旧配置，此时必须重试重启，
+	// 不能直接返回 unchanged。
+	if disk, err := os.ReadFile(configPath); err == nil && sha256Hex(disk) == currentHash && appliedHash == currentHash {
+		return &dto.XrayApplyResponse{
+			Applied:   false,
+			Method:    "unchanged",
+			ConfigLen: len(configJSON),
+			Changed:   false,
+			Message:   "配置无变化，未重启",
+		}, nil
+	}
+
 	if dir := filepath.Dir(configPath); dir != "" {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, NewSystemCommandError("Failed to prepare Xray config directory: "+err.Error(), err)
 		}
 	}
 
-	if err := os.WriteFile(configPath, configJSON, 0644); err != nil {
-		return nil, NewSystemCommandError("Failed to write Xray config: "+err.Error(), err)
+	// 先测后写：生成内容先写到同目录临时文件，对临时文件跑 xray -test，
+	// 通过后再 rename 覆盖正式文件。校验失败时磁盘上不留非法配置。
+	tmpFile, err := os.CreateTemp(filepath.Dir(configPath), ".config.json.*")
+	if err != nil {
+		return nil, NewSystemCommandError("Failed to create temp Xray config: "+err.Error(), err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath) // 成功 rename 后此为 no-op
+	if _, err := tmpFile.Write(configJSON); err != nil {
+		tmpFile.Close()
+		return nil, NewSystemCommandError("Failed to write temp Xray config: "+err.Error(), err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return nil, NewSystemCommandError("Failed to write temp Xray config: "+err.Error(), err)
+	}
+	if err := os.Chmod(tmpPath, 0644); err != nil {
+		return nil, NewSystemCommandError("Failed to set temp Xray config permissions: "+err.Error(), err)
 	}
 
-	cmd := exec.Command(binaryPath, "-test", "-c", configPath)
+	cmd := exec.Command(binaryPath, "-test", "-c", tmpPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		errMsg := strings.TrimSpace(string(output))
 		if len(errMsg) > 500 {
@@ -541,6 +711,19 @@ func (s *SystemService) ApplyXrayConfig(hot bool) (*dto.XrayApplyResponse, error
 		})
 	}
 
+	// 校验通过：旧文件留一份 config.json.bak，再原子 rename 覆盖正式文件。
+	bakPath := configPath + ".bak"
+	if _, err := os.Stat(configPath); err == nil {
+		if err := os.Rename(configPath, bakPath); err != nil {
+			return nil, NewSystemCommandError("Failed to back up old Xray config: "+err.Error(), err)
+		}
+	}
+	if err := os.Rename(tmpPath, configPath); err != nil {
+		// 尽量把旧配置恢复回去。
+		_ = os.Rename(bakPath, configPath)
+		return nil, NewSystemCommandError("Failed to write Xray config: "+err.Error(), err)
+	}
+
 	if s.nginxGen != nil {
 		if _, syncErr := syncManagedNginx(s.db, s.nginxGen, false, ""); syncErr != nil {
 			return nil, syncErr
@@ -548,31 +731,33 @@ func (s *SystemService) ApplyXrayConfig(hot bool) (*dto.XrayApplyResponse, error
 	}
 
 	if err := exec.Command("systemctl", "restart", "xray").Run(); err != nil {
-		applogger.Warn("Failed to restart Xray: %v", err)
-	} else {
-		applogger.Info("Xray service restarted successfully")
+		return nil, NewSystemCommandError("重启 Xray 服务失败，配置已写入但服务仍在运行旧配置: "+err.Error(), err)
 	}
+	applogger.Info("Xray service restarted successfully")
 
+	var warnings []string
 	if s.nginxGen != nil {
 		if err := s.nginxGen.Reload(); err != nil {
+			warnings = append(warnings, "Nginx reload 失败: "+err.Error())
 			applogger.Warn("Failed to reload Nginx: %v", err)
 		} else {
 			applogger.Info("Nginx reloaded successfully")
 		}
 	}
 
-	method := "restart"
-	msg := "配置已写入文件并重启服务"
-	if hot {
-		method = "hot_reload"
-		msg = "配置已校验并重启应用"
+	// 只有整条链路成功才记录已应用哈希；失败的应用不更新该哈希。
+	if err := SetAppliedConfigHash(s.db, currentHash); err != nil {
+		warnings = append(warnings, "已应用哈希记录失败: "+err.Error())
+		applogger.Warn("Failed to record applied Xray config hash: %v", err)
 	}
 
 	return &dto.XrayApplyResponse{
 		Applied:   true,
-		Method:    method,
+		Method:    "restart",
 		ConfigLen: len(configJSON),
-		Message:   msg,
+		Changed:   true,
+		Warnings:  warnings,
+		Message:   "配置已写入文件并重启服务",
 	}, nil
 }
 

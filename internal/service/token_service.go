@@ -34,7 +34,18 @@ func NewTokenService(db *gorm.DB, cfg *config.Config, version string) *TokenServ
 }
 
 // Authenticate validates a raw Bearer token against bootstrap tokens (constant-time)
-// and SHA-256 hashed tokens stored in SQLite.
+// and salted SHA-256 hashed tokens stored in SQLite.
+//
+// Bootstrap tokens are intentionally NOT salted or hashed: they live only in the
+// server config file (never in the database) and are compared directly against
+// the presented token in constant time. They are not listed by GET /tokens and
+// cannot be revoked through the API; rotate them by editing the config file.
+//
+// Database tokens carry a per-token random salt, so they cannot be looked up by
+// hash. All stored tokens are verified in turn (the table holds a handful of
+// admin tokens). Rows with an empty Salt predate salting: they are verified once
+// against the legacy unsalted hash and, on success, upgraded in place to a
+// salted hash.
 func (s *TokenService) Authenticate(rawToken, clientIP string) (*AuthContext, error) {
 	rawToken = strings.TrimSpace(rawToken)
 	if rawToken == "" {
@@ -58,21 +69,53 @@ func (s *TokenService) Authenticate(rawToken, clientIP string) (*AuthContext, er
 		}
 	}
 
-	hash := models.HashAPIToken(rawToken)
-	var tok models.APIToken
-	if err := s.db.Where("token_hash = ?", hash).First(&tok).Error; err != nil {
+	var tokens []models.APIToken
+	if err := s.db.Find(&tokens).Error; err != nil {
 		return nil, NewUnauthorizedError("Invalid or revoked API token")
 	}
+
+	var matched *models.APIToken
+	for i := range tokens {
+		tok := &tokens[i]
+		var want string
+		var err error
+		if tok.Salt != "" {
+			want, err = models.HashAPITokenWithSalt(rawToken, tok.Salt)
+			if err != nil {
+				continue
+			}
+		} else {
+			want = models.HashAPIToken(rawToken)
+		}
+		if len(want) == len(tok.TokenHash) && subtle.ConstantTimeCompare([]byte(want), []byte(tok.TokenHash)) == 1 {
+			matched = tok
+			break
+		}
+	}
+	if matched == nil {
+		return nil, NewUnauthorizedError("Invalid or revoked API token")
+	}
+	tok := matched
 
 	now := time.Now()
 	if !tok.IsValid(now) {
 		return nil, NewUnauthorizedError("Invalid or revoked API token")
 	}
 
-	_ = s.db.Model(&models.APIToken{}).Where("id = ?", tok.ID).Updates(map[string]interface{}{
+	// One-time upgrade of a legacy unsalted row to a salted hash.
+	updates := map[string]interface{}{
 		"last_used_at": now,
 		"last_ip":      clientIP,
-	}).Error
+	}
+	if tok.Salt == "" {
+		if salt, err := models.NewSalt(); err == nil {
+			if hash, err := models.HashAPITokenWithSalt(rawToken, salt); err == nil {
+				updates["salt"] = salt
+				updates["token_hash"] = hash
+			}
+		}
+	}
+	_ = s.db.Model(&models.APIToken{}).Where("id = ?", tok.ID).Updates(updates).Error
 
 	return &AuthContext{
 		TokenID:     tok.ID,
@@ -124,7 +167,7 @@ func (s *TokenService) Create(req dto.CreateTokenRequest) (*dto.CreateTokenRespo
 		return nil, NewValidationError("expires_days must be >= 0")
 	}
 
-	raw, prefix, hash, err := models.GenerateAPIToken()
+	raw, prefix, hash, salt, err := models.GenerateAPIToken()
 	if err != nil {
 		return nil, NewInternalError("Failed to generate API token", err)
 	}
@@ -139,6 +182,7 @@ func (s *TokenService) Create(req dto.CreateTokenRequest) (*dto.CreateTokenRespo
 		Name:        name,
 		TokenPrefix: prefix,
 		TokenHash:   hash,
+		Salt:        salt,
 		ExpiresAt:   expiresAt,
 	}
 	if err := s.db.Create(&tok).Error; err != nil {

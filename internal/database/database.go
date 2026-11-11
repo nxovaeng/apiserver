@@ -15,10 +15,17 @@ import (
 )
 
 // Init initializes the SQLite database connection.
+// The database directory is created with 0700 and the database file itself is
+// chmodded to 0600, because it stores secrets (API token hashes, WireGuard
+// private keys, outbound passwords). ":memory:" databases are exempt.
 func Init(dbPath string) (*gorm.DB, error) {
 	if dbPath != ":memory:" {
 		dir := filepath.Dir(dbPath)
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return nil, err
+		}
+		// MkdirAll does not tighten an already-existing directory.
+		if err := os.Chmod(dir, 0700); err != nil {
 			return nil, err
 		}
 	}
@@ -28,6 +35,12 @@ func Init(dbPath string) (*gorm.DB, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	if dbPath != ":memory:" {
+		if err := os.Chmod(dbPath, 0600); err != nil {
+			return nil, err
+		}
 	}
 
 	return db, nil
@@ -81,7 +94,7 @@ func Seed(db *gorm.DB, cfg *config.Config) (*SeedResult, error) {
 	}
 	hasBootstrap := cfg != nil && len(cfg.Auth.BootstrapTokens) > 0
 	if tokenCount == 0 && !hasBootstrap {
-		raw, prefix, hash, err := models.GenerateAPIToken()
+		raw, prefix, hash, salt, err := models.GenerateAPIToken()
 		if err != nil {
 			return nil, err
 		}
@@ -89,6 +102,7 @@ func Seed(db *gorm.DB, cfg *config.Config) (*SeedResult, error) {
 			Name:        "default",
 			TokenPrefix: prefix,
 			TokenHash:   hash,
+			Salt:        salt,
 		}
 		if err := db.Create(tok).Error; err != nil {
 			return nil, err

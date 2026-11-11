@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -90,6 +91,12 @@ func runServer(args []string) {
 	if _, err := database.Seed(db, cfg); err != nil {
 		logger.Fatal("数据库初始化失败: %v", err)
 	}
+
+	// 证书续期 worker：每天检查一次证书过期时间，30 天内过期的按原签发
+	// 路径自动续期（见 internal/service/lego_acme.go）。失败只记日志，
+	// 不阻塞启动、不影响其它任务。
+	domainSvc := service.NewDomainService(db, cfg)
+	domainSvc.StartCertRenewalWorker(context.Background(), service.CertRenewalInterval)
 
 	logger.Info("正在启动 xray-panel-server v%s，监听地址: %s", Version, cfg.Server.Listen)
 	srv := api.NewServer(cfg, db, Version)
@@ -298,16 +305,25 @@ func initCLI(configPath string) (*config.Config, *gorm.DB) {
 }
 
 func initWithLogOverride(configPath string, quiet bool) (*config.Config, *gorm.DB) {
-	if configPath == "" {
-		configPath = resolveDefaultConfigPath()
+	explicit := configPath != ""
+	if !explicit {
+		foundPath, found := resolveDefaultConfigPath()
+		if !found {
+			// install.sh guarantees a real config at /opt/xray-panel/config.yaml
+			// (write_config creates it, chmod 600, and systemd runs with
+			// --config pointing at it). A missing config therefore means the
+			// server was never installed, not that defaults should apply.
+			log.Fatalf("未找到配置文件 (已查找 conf/config.yaml 与 /opt/xray-panel/config.yaml)，请先运行 scripts/install.sh 安装，或用 --config 指定配置文件路径")
+		}
+		configPath = foundPath
 	}
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		if !quiet {
-			log.Printf("警告: 无法加载配置文件 (%s)，使用默认配置: %v", configPath, err)
+		if explicit {
+			log.Fatalf("无法加载 --config 指定的配置文件 (%s)，请检查路径与文件内容: %v", configPath, err)
 		}
-		cfg = config.Default()
+		log.Fatalf("无法加载配置文件 (%s)，请检查文件内容: %v", configPath, err)
 	}
 
 	logCfg := cfg.Log
@@ -327,16 +343,18 @@ func initWithLogOverride(configPath string, quiet bool) (*config.Config, *gorm.D
 	return cfg, db
 }
 
-func resolveDefaultConfigPath() string {
+// resolveDefaultConfigPath returns the first existing candidate config path.
+// conf/config.yaml.example is deliberately NOT a candidate: it is documentation,
+// never a live configuration.
+func resolveDefaultConfigPath() (string, bool) {
 	candidates := []string{
 		"conf/config.yaml",
 		"/opt/xray-panel/config.yaml",
-		"conf/config.yaml.example",
 	}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
-			return c
+			return c, true
 		}
 	}
-	return "conf/config.yaml"
+	return "", false
 }

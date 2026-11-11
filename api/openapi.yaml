@@ -1319,15 +1319,8 @@ paths:
   /api/v1/xray/apply:
     post:
       tags: [Xray & System]
-      summary: Generate, validate (`xray -test`), write Xray/Nginx configs, and restart/reload services
+      summary: Generate, validate (`xray -test`), write Xray/Nginx configs, and restart/reload services; no-op when config is unchanged
       operationId: applyXrayConfig
-      parameters:
-        - name: hot
-          in: query
-          description: Request hot reload mode if supported
-          schema:
-            type: boolean
-            default: false
       responses:
         "200":
           description: Configuration applied
@@ -3809,13 +3802,23 @@ components:
 
     XrayConfigResponse:
       type: object
-      required: [config, raw]
+      required: [config, raw, current_hash, applied_hash, dirty]
       properties:
         config:
           type: object
           additionalProperties: true
         raw:
           type: string
+          description: Redacted Xray JSON (secrets replaced with "***", client ids masked)
+        current_hash:
+          type: string
+          description: SHA256 of the currently generated config
+        applied_hash:
+          type: string
+          description: SHA256 of the last successfully applied config (empty if never applied)
+        dirty:
+          type: boolean
+          description: True when current_hash differs from applied_hash
 
     XrayConfigEnvelope:
       type: object
@@ -3829,15 +3832,24 @@ components:
 
     XrayApplyResponse:
       type: object
-      required: [applied, method, config_len, message]
+      required: [applied, method, config_len, changed, message]
       properties:
         applied:
           type: boolean
         method:
           type: string
-          enum: [restart, hot_reload]
+          enum: [restart, unchanged]
+          description: "restart when config changed and was applied, unchanged when nothing changed"
         config_len:
           type: integer
+        changed:
+          type: boolean
+          description: True when the config was actually written and the service restarted
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Non-fatal problems (e.g. Nginx reload failure) that did not block the apply
         message:
           type: string
 

@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -408,6 +409,15 @@ func TestSettingsAndXrayApplyValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Fake systemctl on PATH so `systemctl restart xray` succeeds in tests.
+	// The script is rewritten to fail later in this test to cover the
+	// restart-failure path.
+	systemctlPath := filepath.Join(tmpDir, "systemctl")
+	if err := os.WriteFile(systemctlPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	// Fake xray binary script that succeeds on `-test`
 	fakeXray := filepath.Join(tmpDir, "xray-ok.sh")
 	if err := os.WriteFile(fakeXray, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
@@ -432,21 +442,210 @@ func TestSettingsAndXrayApplyValidation(t *testing.T) {
 		t.Fatalf("expected normalized /secret-sub, got %+v err=%v", updated, err)
 	}
 
-	applyRes, err := sysSvc.ApplyXrayConfig(false)
-	if err != nil || !applyRes.Applied {
+	// 1. First apply: real change, must write + restart.
+	applyRes, err := sysSvc.ApplyXrayConfig()
+	if err != nil || !applyRes.Applied || !applyRes.Changed || applyRes.Method != "restart" {
 		t.Fatalf("ApplyXrayConfig with passing validator failed: %+v err=%v", applyRes, err)
 	}
+	if len(applyRes.Warnings) != 0 {
+		t.Fatalf("unexpected warnings on clean apply: %v", applyRes.Warnings)
+	}
+	firstDisk, err := os.ReadFile(cfg.Xray.ConfigPath)
+	if err != nil {
+		t.Fatalf("applied config not on disk: %v", err)
+	}
 
-	// Failing xray -test must return XRAY_VALIDATION_FAILED
+	// Preview is not dirty right after a successful apply.
+	preview, err := sysSvc.GetXrayConfigPreview()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Dirty || preview.CurrentHash == "" || preview.AppliedHash != preview.CurrentHash {
+		t.Fatalf("expected clean preview after apply: %+v", preview)
+	}
+
+	// 2. Second apply without changes: unchanged, no write, no restart.
+	applyRes, err = sysSvc.ApplyXrayConfig()
+	if err != nil || applyRes.Applied || applyRes.Changed || applyRes.Method != "unchanged" {
+		t.Fatalf("expected unchanged second apply: %+v err=%v", applyRes, err)
+	}
+	if !strings.Contains(applyRes.Message, "无变化") {
+		t.Fatalf("unexpected unchanged message: %q", applyRes.Message)
+	}
+	secondDisk, _ := os.ReadFile(cfg.Xray.ConfigPath)
+	if !bytes.Equal(firstDisk, secondDisk) {
+		t.Fatalf("unchanged apply rewrote the config file")
+	}
+
+	// 3. Change the config (log level) -> preview dirty, apply writes + keeps .bak.
+	debugLvl := "debug"
+	if _, err := sysSvc.UpdateSettings(dto.UpdateSettingsRequest{XrayLogLevel: &debugLvl}); err != nil {
+		t.Fatal(err)
+	}
+	preview, err = sysSvc.GetXrayConfigPreview()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Dirty || preview.CurrentHash == preview.AppliedHash {
+		t.Fatalf("expected dirty preview after settings change: %+v", preview)
+	}
+	applyRes, err = sysSvc.ApplyXrayConfig()
+	if err != nil || !applyRes.Applied || !applyRes.Changed {
+		t.Fatalf("apply after change failed: %+v err=%v", applyRes, err)
+	}
+	bak, err := os.ReadFile(cfg.Xray.ConfigPath + ".bak")
+	if err != nil {
+		t.Fatalf("expected config.json.bak after second real apply: %v", err)
+	}
+	if !bytes.Equal(bak, firstDisk) {
+		t.Fatalf("config.json.bak does not contain the previous config")
+	}
+
+	// 4. Failing xray -test must return XRAY_VALIDATION_FAILED and leave the
+	// last good config (and no temp files) on disk.
 	badXray := filepath.Join(tmpDir, "xray-fail.sh")
 	if err := os.WriteFile(badXray, []byte("#!/bin/sh\necho 'invalid inbound' >&2\nexit 2\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	cfg.Xray.BinaryPath = badXray
-	if _, err := sysSvc.ApplyXrayConfig(false); err == nil {
+	warnLvl := "warning"
+	if _, err := sysSvc.UpdateSettings(dto.UpdateSettingsRequest{XrayLogLevel: &warnLvl}); err != nil {
+		t.Fatal(err)
+	}
+	goodDisk, _ := os.ReadFile(cfg.Xray.ConfigPath)
+	if _, err := sysSvc.ApplyXrayConfig(); err == nil {
 		t.Fatalf("expected XRAY_VALIDATION_FAILED error")
 	} else if appErr, ok := service.AsAppError(err); !ok || appErr.Code != dto.ErrXrayValidationFailed {
 		t.Fatalf("expected ErrXrayValidationFailed, got %v", err)
+	}
+	afterFailDisk, _ := os.ReadFile(cfg.Xray.ConfigPath)
+	if !bytes.Equal(goodDisk, afterFailDisk) {
+		t.Fatalf("failed validation left an invalid config on disk")
+	}
+	if temps, _ := filepath.Glob(filepath.Join(filepath.Dir(cfg.Xray.ConfigPath), ".config.json.*")); len(temps) != 0 {
+		t.Fatalf("temp config files left behind: %v", temps)
+	}
+	cfg.Xray.BinaryPath = fakeXray
+
+	// 5. Restart failure must return an error and must not update the
+	// applied hash (preview stays dirty, next apply retries the restart).
+	if err := os.WriteFile(systemctlPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	previewBefore, err := sysSvc.GetXrayConfigPreview()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sysSvc.ApplyXrayConfig(); err == nil {
+		t.Fatalf("expected error when systemctl restart fails")
+	} else if appErr, ok := service.AsAppError(err); !ok || appErr.Code != dto.ErrSystemCommandFailed {
+		t.Fatalf("expected ErrSystemCommandFailed, got %v", err)
+	}
+	previewAfter, err := sysSvc.GetXrayConfigPreview()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if previewAfter.AppliedHash != previewBefore.AppliedHash || !previewAfter.Dirty {
+		t.Fatalf("failed restart must not update applied hash: before=%+v after=%+v", previewBefore, previewAfter)
+	}
+	// Restore working systemctl: the retry must succeed. The disk already
+	// holds the new config, but the applied hash differs, so it must not
+	// take the unchanged shortcut.
+	if err := os.WriteFile(systemctlPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	applyRes, err = sysSvc.ApplyXrayConfig()
+	if err != nil || !applyRes.Applied || !applyRes.Changed {
+		t.Fatalf("retry after failed restart failed: %+v err=%v", applyRes, err)
+	}
+}
+
+func TestXrayConfigPreviewRedaction(t *testing.T) {
+	db, cfg, _ := setupTestEnv(t)
+	if _, err := database.Seed(db, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	const userUUID = "550e8400-e29b-41d4-a716-446655440000"
+	if err := db.Create(&models.User{
+		UUID:    userUUID,
+		Name:    "redact-user",
+		Email:   "redact@example.com",
+		Enabled: true,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.Inbound{
+		ID: "inb-vless", Tag: "vless-in", Protocol: models.ProtocolVLESS,
+		Transport: models.TransportWS, Port: 10001, UseUDS: false,
+		Enabled: true,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	const wgSecret = "WGSECRET-PRIVATE-KEY-DO-NOT-LEAK"
+	if err := db.Create(&models.Inbound{
+		ID: "inb-wg", Tag: "wg-in", Protocol: models.ProtocolWireGuard,
+		Port: 51820, UseUDS: false, WGSecretKey: wgSecret,
+		Enabled: true,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	sysSvc := service.NewSystemService(db, cfg, nil)
+	preview, err := sysSvc.GetXrayConfigPreview()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(preview.Raw, userUUID) {
+		t.Fatalf("preview Raw leaks full user UUID")
+	}
+	if !strings.Contains(preview.Raw, userUUID[:8]+"****") {
+		t.Fatalf("preview Raw does not contain masked client id, raw=%s", preview.Raw)
+	}
+	if strings.Contains(preview.Raw, wgSecret) {
+		t.Fatalf("preview Raw leaks WireGuard secretKey")
+	}
+	if !strings.Contains(preview.Raw, `"secretKey": "***"`) {
+		t.Fatalf("preview Raw does not redact secretKey, raw=%s", preview.Raw)
+	}
+	// Dirty: never applied.
+	if !preview.Dirty || preview.AppliedHash != "" || preview.CurrentHash == "" {
+		t.Fatalf("expected dirty preview before any apply: %+v", preview)
+	}
+	// The decoded config map must be redacted too, not just Raw.
+	inbounds, ok := preview.Config["inbounds"].([]interface{})
+	if !ok || len(inbounds) == 0 {
+		t.Fatalf("preview config has no inbounds: %+v", preview.Config)
+	}
+	found := false
+	for _, rawIn := range inbounds {
+		in, ok := rawIn.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		settings, ok := in["settings"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		clients, ok := settings["clients"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, rawCl := range clients {
+			cl, ok := rawCl.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if id, _ := cl["id"].(string); id != "" {
+				found = true
+				if id != userUUID[:8]+"****" {
+					t.Fatalf("client id not masked in config map: %q", id)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no client id found in preview config")
 	}
 }
 

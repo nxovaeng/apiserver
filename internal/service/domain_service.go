@@ -21,6 +21,7 @@ import (
 
 	"xray-panel-server/internal/config"
 	"xray-panel-server/internal/dto"
+	applogger "xray-panel-server/internal/logger"
 	"xray-panel-server/internal/models"
 	"xray-panel-server/internal/utils"
 )
@@ -37,6 +38,11 @@ type DomainService struct {
 	db         *gorm.DB
 	cfg        *config.Config
 	acmeRunner AcmeRunner
+	// customAcmeRunner is true when SetAcmeRunner injected a runner. An
+	// injected runner overrides the whole issuance backend (including the
+	// lego pilot branch below); production never injects one.
+	customAcmeRunner bool
+	lego             LegoIssuer
 }
 
 func NewDomainService(db *gorm.DB, cfg *config.Config) *DomainService {
@@ -45,11 +51,31 @@ func NewDomainService(db *gorm.DB, cfg *config.Config) *DomainService {
 	return s
 }
 
-// SetAcmeRunner injects a custom ACME runner (for testing).
+// SetAcmeRunner injects a custom ACME runner (for testing). An injected
+// runner takes precedence over the lego pilot branch: all issuance goes
+// through it.
 func (s *DomainService) SetAcmeRunner(runner AcmeRunner) {
 	if runner != nil {
 		s.acmeRunner = runner
+		s.customAcmeRunner = true
 	}
+}
+
+// SetLegoIssuer injects a custom lego issuer (for testing).
+func (s *DomainService) SetLegoIssuer(issuer LegoIssuer) {
+	if issuer != nil {
+		s.lego = issuer
+	}
+}
+
+// legoIssuer returns the configured lego issuer, lazily constructing the
+// production one from the certificate directory.
+func (s *DomainService) legoIssuer() LegoIssuer {
+	if s.lego != nil {
+		return s.lego
+	}
+	s.lego = newLegoIssuer(s.certDir())
+	return s.lego
 }
 
 func (s *DomainService) List() (*dto.DomainListResponse, error) {
@@ -91,6 +117,12 @@ func (s *DomainService) Create(req dto.UpsertDomainRequest) (*dto.DomainDTO, err
 	keyPath := strings.TrimSpace(req.KeyPath)
 	if dtype == models.DomainTypeDirect || dtype == models.DomainTypeCDN {
 		if err := validateCertificatePaths(certPath, keyPath); err != nil {
+			return nil, err
+		}
+		if err := s.validateCertPathWithinCertDir(certPath); err != nil {
+			return nil, err
+		}
+		if err := s.validateCertPathWithinCertDir(keyPath); err != nil {
 			return nil, err
 		}
 	}
@@ -150,6 +182,12 @@ func (s *DomainService) Update(id string, req dto.UpsertDomainRequest) (*dto.Dom
 	keyPath := strings.TrimSpace(req.KeyPath)
 	if dtype == models.DomainTypeDirect || dtype == models.DomainTypeCDN {
 		if err := validateCertificatePaths(certPath, keyPath); err != nil {
+			return nil, err
+		}
+		if err := s.validateCertPathWithinCertDir(certPath); err != nil {
+			return nil, err
+		}
+		if err := s.validateCertPathWithinCertDir(keyPath); err != nil {
 			return nil, err
 		}
 	}
@@ -279,10 +317,33 @@ func (s *DomainService) ScanAndImportCertificates() (*dto.ScanImportCertificates
 	}, nil
 }
 
+// validateCertPathWithinCertDir requires p to be an absolute path inside the
+// configured certificate directory (Nginx.CertDir, default /root/.acme.sh).
+// This stops a token holder from pointing the panel at arbitrary files on
+// disk (the server runs as root) via import-cert. The check runs before the
+// file is read or parsed.
+func (s *DomainService) validateCertPathWithinCertDir(p string) error {
+	certDir := filepath.Clean(s.certDir())
+	clean := filepath.Clean(strings.TrimSpace(p))
+	if !filepath.IsAbs(clean) {
+		return NewValidationError("证书路径必须是绝对路径: " + p)
+	}
+	if clean != certDir && !strings.HasPrefix(clean, certDir+string(os.PathSeparator)) {
+		return NewValidationError("证书路径必须位于证书目录内 (" + certDir + "): " + p)
+	}
+	return nil
+}
+
 func (s *DomainService) ImportSingleCertificate(req dto.ImportCertRequest) (*dto.DomainDTO, error) {
 	certPath := strings.TrimSpace(req.CertPath)
 	keyPath := strings.TrimSpace(req.KeyPath)
 	if err := validateCertificatePaths(certPath, keyPath); err != nil {
+		return nil, err
+	}
+	if err := s.validateCertPathWithinCertDir(certPath); err != nil {
+		return nil, err
+	}
+	if err := s.validateCertPathWithinCertDir(keyPath); err != nil {
 		return nil, err
 	}
 
@@ -368,7 +429,9 @@ func (s *DomainService) UploadCertificate(req dto.UploadCertRequest) (*dto.Domai
 	certDir := s.certDir()
 	safeFolder := sanitizeCertFolderName(domainName)
 	targetDir := filepath.Clean(filepath.Join(certDir, safeFolder))
-	if !strings.HasPrefix(targetDir, filepath.Clean(certDir)+string(os.PathSeparator)) {
+	// Uploaded PEM content is always written under certDir; reuse the same
+	// containment check as import-cert so both entry points share one rule.
+	if err := s.validateCertPathWithinCertDir(targetDir); err != nil {
 		return nil, NewValidationError("非法的证书存储路径")
 	}
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
@@ -463,6 +526,13 @@ func (s *DomainService) IssueCertificate(ctx context.Context, req dto.IssueCertR
 		storedDomain = "*." + baseDomain
 	}
 
+	// 试点：Cloudflare + Let's Encrypt 走 Go 原生 lego（见 lego_acme.go）；
+	// 其它组合（LuaDNS、ZeroSSL）继续走下面的 acme.sh 分支。注入了自定义
+	// AcmeRunner 时（测试）全部走该 runner，不走 lego。
+	if provider == "cf" && caServer == "letsencrypt" && !s.customAcmeRunner {
+		return s.issueViaLego(ctx, req, dtype, baseDomain, storedDomain, wantWildcard, provider, caServer)
+	}
+
 	if email != "" {
 		regArgs := []string{"--register-account", "-m", email, "--server", caServer}
 		regOut, regCode, regErr := s.acmeRunner.Run(ctx, regArgs, extraEnv)
@@ -506,6 +576,7 @@ func (s *DomainService) IssueCertificate(ctx context.Context, req dto.IssueCertR
 	if err != nil {
 		return nil, err
 	}
+	s.recordCertSource(storedDomain, provider, caServer)
 
 	return &dto.IssueCertResponse{
 		Domain:         *domDTO,
@@ -513,6 +584,53 @@ func (s *DomainService) IssueCertificate(ctx context.Context, req dto.IssueCertR
 		CAServer:       caServer,
 		ReusedExisting: reused,
 		Output:         cleanOutput,
+	}, nil
+}
+
+// issueViaLego issues a certificate through the Go-native lego issuer
+// (Cloudflare DNS-01 + Let's Encrypt only). The IssueCertResponse shape is
+// identical to the acme.sh branch. Unlike acme.sh, nginx is reloaded here
+// explicitly after a fresh issuance.
+func (s *DomainService) issueViaLego(ctx context.Context, req dto.IssueCertRequest, dtype models.DomainType, baseDomain, storedDomain string, wantWildcard bool, provider, caServer string) (*dto.IssueCertResponse, error) {
+	cfToken := strings.TrimSpace(req.CFToken)
+	cfKey := strings.TrimSpace(req.CFKey)
+	cfEmail := strings.TrimSpace(req.CFEmail)
+	cfZoneID := strings.TrimSpace(req.CFZoneID)
+	if cfToken == "" && (cfKey == "" || cfEmail == "") {
+		return nil, NewValidationError("Cloudflare 需提供 CF_Token，或同时提供 CF_Key 与 CF_Email")
+	}
+
+	certPath, keyPath, reused, output, err := s.legoIssuer().Issue(ctx, LegoIssueParams{
+		Domain:       baseDomain,
+		WantWildcard: wantWildcard,
+		CFToken:      cfToken,
+		CFKey:        cfKey,
+		CFEmail:      cfEmail,
+		CFZoneID:     cfZoneID,
+		Email:        strings.TrimSpace(req.Email),
+	})
+	if err != nil {
+		return nil, NewSystemCommandError("Lego 证书申请失败: "+redactSecrets(output, []string{cfToken, cfKey}), err)
+	}
+
+	domDTO, err := s.upsertCertDomain(storedDomain, dtype, wantWildcard, certPath, keyPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	s.recordCertSource(storedDomain, provider, caServer)
+
+	if !reused {
+		if err := s.reloadNginx(); err != nil {
+			applogger.Warn("Lego 签发后重载 Nginx 失败: %v", err)
+		}
+	}
+
+	return &dto.IssueCertResponse{
+		Domain:         *domDTO,
+		Provider:       provider,
+		CAServer:       caServer,
+		ReusedExisting: reused,
+		Output:         output,
 	}, nil
 }
 
