@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -41,8 +43,28 @@ type DomainService struct {
 
 func NewDomainService(db *gorm.DB, cfg *config.Config) *DomainService {
 	s := &DomainService{db: db, cfg: cfg}
-	s.acmeRunner = &execAcmeRunner{certDirFn: s.certDir}
+	s.acmeRunner = newExecAcmeRunner(cfg, s.certDir)
 	return s
+}
+
+// newExecAcmeRunner builds the production acme.sh runner from config. An
+// empty archive URL/SHA-256 means "use the pinned release"; a nil
+// AutoInstall means enabled.
+func newExecAcmeRunner(cfg *config.Config, certDirFn func() string) *execAcmeRunner {
+	r := &execAcmeRunner{certDirFn: certDirFn}
+	if cfg == nil {
+		return r
+	}
+	if cfg.Acme.AutoInstall != nil && !*cfg.Acme.AutoInstall {
+		r.autoInstallDisabled = true
+	}
+	if u := strings.TrimSpace(cfg.Acme.ArchiveURL); u != "" {
+		r.archiveURL = u
+	}
+	if h := strings.TrimSpace(cfg.Acme.ArchiveSHA256); h != "" {
+		r.archiveSHA256 = strings.ToLower(h)
+	}
+	return r
 }
 
 // SetAcmeRunner injects a custom ACME runner (for testing).
@@ -631,16 +653,27 @@ func redactSecrets(text string, secrets []string) string {
 }
 
 const (
-	defaultAcmeArchiveURL = "https://github.com/acmesh-official/acme.sh/archive/refs/heads/master.tar.gz"
-	maxAcmeArchiveBytes   = 64 << 20 // 64 MiB safety limit for extracted acme.sh archive
+	// Pinned acme.sh release. The master branch is never used: a floating
+	// ref plus no integrity check meant any upstream change (or a
+	// compromised download) would run as root on first issuance.
+	// Bump together with defaultAcmeArchiveSHA256 and scripts/install.sh.
+	defaultAcmeVersion    = "3.1.6"
+	defaultAcmeArchiveURL = "https://github.com/acmesh-official/acme.sh/archive/refs/tags/3.1.6.tar.gz"
+	// SHA-256 of the 3.1.6 release tarball, fetched 2026-11-11 over HTTPS
+	// and verified to contain acme.sh + dnsapi/dns_cf.sh. A custom
+	// archive_url in config must come with its own archive_sha256.
+	defaultAcmeArchiveSHA256 = "0d3f9000ac44a6331314742a88c475f79134e24fc991997883652adc59efc486"
+	maxAcmeArchiveBytes      = 64 << 20 // 64 MiB safety limit for the acme.sh archive
 )
 
 type execAcmeRunner struct {
-	certDirFn        func() string
-	archiveURL       string
-	httpClient       *http.Client
-	skipSystemLookup bool
-	installMu        sync.Mutex
+	certDirFn           func() string
+	archiveURL          string
+	archiveSHA256       string // empty = skip verification (only for tests with a local archive)
+	httpClient          *http.Client
+	skipSystemLookup    bool
+	autoInstallDisabled bool
+	installMu           sync.Mutex
 }
 
 func (r *execAcmeRunner) Run(ctx context.Context, args []string, extraEnv []string) (string, int, error) {
@@ -661,7 +694,13 @@ func (r *execAcmeRunner) Run(ctx context.Context, args []string, extraEnv []stri
 	fullArgs = append(fullArgs, args...)
 
 	cmd := exec.CommandContext(ctx, acmeBin, fullArgs...)
-	cmd.Env = envWithHome(os.Environ(), resolveHomeEnv(certDir), extraEnv)
+	// Pin the acme.sh working directory explicitly. --home already does
+	// this, but LE_WORKING_DIR/LE_CONFIG_HOME make it independent of $HOME
+	// and of any --home parsing change: account.conf and the account key
+	// must never land in an unexpected home directory.
+	env := envWithHome(os.Environ(), resolveHomeEnv(certDir), extraEnv)
+	env = append(env, "LE_WORKING_DIR="+acmeHome, "LE_CONFIG_HOME="+acmeHome)
+	cmd.Env = env
 
 	outBytes, runErr := cmd.CombinedOutput()
 	output := string(outBytes)
@@ -672,6 +711,10 @@ func (r *execAcmeRunner) Run(ctx context.Context, args []string, extraEnv []stri
 		}
 		return output, -1, runErr
 	}
+	// Issuance / account registration can create account.conf and account
+	// keys; re-tighten best-effort so a permissive umask never leaves
+	// DNS API credentials world-readable.
+	r.tightenAcmeHome(acmeHome, certDir)
 	return output, 0, nil
 }
 
@@ -687,11 +730,22 @@ func (r *execAcmeRunner) ensureBinary(ctx context.Context, certDir string) (stri
 		return acmeBin, acmeHome, nil
 	}
 
+	if r.autoInstallDisabled {
+		return "", "", fmt.Errorf("未找到 acme.sh，且配置已关闭自动安装 (acme.auto_install=false)；请用 scripts/install.sh 预装，或开启自动安装")
+	}
+
 	archiveURL := strings.TrimSpace(r.archiveURL)
 	if archiveURL == "" {
 		archiveURL = defaultAcmeArchiveURL
 	}
-	installed, err := installAcmeFromArchive(ctx, r.httpClient, archiveURL, certDir)
+	expectedSHA256 := strings.ToLower(strings.TrimSpace(r.archiveSHA256))
+	if expectedSHA256 == "" && archiveURL == defaultAcmeArchiveURL {
+		expectedSHA256 = defaultAcmeArchiveSHA256
+	}
+	if expectedSHA256 == "" {
+		return "", "", fmt.Errorf("拒绝下载 acme.sh：未提供 archive_sha256，无法校验安装包完整性")
+	}
+	installed, err := installAcmeFromArchive(ctx, r.httpClient, archiveURL, expectedSHA256, certDir)
 	if err != nil {
 		return "", "", err
 	}
@@ -737,9 +791,15 @@ func resolveAcmeHomeDir(acmeBin string) string {
 	return dir
 }
 
-func installAcmeFromArchive(ctx context.Context, client *http.Client, archiveURL, targetHome string) (string, error) {
-	if err := os.MkdirAll(targetHome, 0755); err != nil {
+func installAcmeFromArchive(ctx context.Context, client *http.Client, archiveURL, expectedSHA256, targetHome string) (string, error) {
+	// The acme home holds account.conf with DNS API credentials
+	// (CF_Token etc.) and the ACME account key: 0700, and tighten an
+	// already-existing directory too (MkdirAll alone never narrows perms).
+	if err := os.MkdirAll(targetHome, 0700); err != nil {
 		return "", fmt.Errorf("创建 acme.sh 目录 %s 失败: %w", targetHome, err)
+	}
+	if err := os.Chmod(targetHome, 0700); err != nil {
+		return "", fmt.Errorf("收紧 acme.sh 目录权限 %s 失败: %w", targetHome, err)
 	}
 
 	if client == nil {
@@ -769,7 +829,37 @@ func installAcmeFromArchive(ctx context.Context, client *http.Client, archiveURL
 	}
 	defer os.RemoveAll(tmpDir)
 
-	if err := extractTarGz(resp.Body, tmpDir); err != nil {
+	// Download to a file first so the SHA-256 can be verified before
+	// anything from the archive is executed. The archive is only ~0.5 MiB;
+	// maxAcmeArchiveBytes still caps a malicious oversized response.
+	archiveFile, err := os.CreateTemp(tmpDir, "acme-*.tar.gz")
+	if err != nil {
+		return "", fmt.Errorf("创建下载临时文件失败: %w", err)
+	}
+	archivePath := archiveFile.Name()
+	hasher := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(archiveFile, hasher), io.LimitReader(resp.Body, maxAcmeArchiveBytes+1))
+	closeErr := archiveFile.Close()
+	if copyErr != nil {
+		return "", fmt.Errorf("下载 acme.sh 失败 (%s): %w", archiveURL, copyErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("保存 acme.sh 安装包失败: %w", closeErr)
+	}
+	if written > maxAcmeArchiveBytes {
+		return "", fmt.Errorf("acme.sh 安装包超过大小限制 (%d 字节)", maxAcmeArchiveBytes)
+	}
+	actualSHA256 := hex.EncodeToString(hasher.Sum(nil))
+	if actualSHA256 != strings.ToLower(expectedSHA256) {
+		return "", fmt.Errorf("acme.sh 安装包 SHA-256 校验失败：期望 %s，实际 %s（安装包可能被篡改或版本已变更，请更新配置中的 pin）", strings.ToLower(expectedSHA256), actualSHA256)
+	}
+
+	archiveReader, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("读取 acme.sh 安装包失败: %w", err)
+	}
+	defer archiveReader.Close()
+	if err := extractTarGz(archiveReader, tmpDir); err != nil {
 		return "", fmt.Errorf("解压 acme.sh 压缩包失败: %w", err)
 	}
 
@@ -781,6 +871,7 @@ func installAcmeFromArchive(ctx context.Context, client *http.Client, archiveURL
 
 	homeEnv := resolveHomeEnv(targetHome)
 	installEnv := envWithHome(os.Environ(), homeEnv, nil)
+	installEnv = append(installEnv, "LE_WORKING_DIR="+targetHome, "LE_CONFIG_HOME="+targetHome)
 
 	installArgs := []string{"--install", "--home", targetHome}
 	_, cronErr := exec.LookPath("crontab")
@@ -804,7 +895,7 @@ func installAcmeFromArchive(ctx context.Context, client *http.Client, archiveURL
 			retryOut, retryErr := runInstall(retryArgs)
 			if retryErr == nil && fileExists(installed) {
 				_ = os.Chmod(installed, 0755)
-				return installed, nil
+				return finalizeAcmeInstall(ctx, installed, targetHome)
 			}
 			if retryOut != "" {
 				outStr = retryOut
@@ -820,7 +911,48 @@ func installAcmeFromArchive(ctx context.Context, client *http.Client, archiveURL
 	}
 
 	_ = os.Chmod(installed, 0755)
+	return finalizeAcmeInstall(ctx, installed, targetHome)
+}
+
+// finalizeAcmeInstall tightens permissions on the freshly installed acme
+// home and smoke-tests the binary before the panel trusts it. A wrong
+// binary (or a half-copied install) must fail here, not at the first real
+// issuance.
+func finalizeAcmeInstall(ctx context.Context, installed, targetHome string) (string, error) {
+	tightenAcmeHome(targetHome, targetHome)
+	cmd := exec.CommandContext(ctx, installed, "--home", targetHome, "--version")
+	cmd.Env = envWithHome(os.Environ(), resolveHomeEnv(targetHome), []string{"LE_WORKING_DIR=" + targetHome, "LE_CONFIG_HOME=" + targetHome})
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("安装后校验 acme.sh 失败 (%s): %v", strings.TrimSpace(string(out)), err)
+	}
+	if !strings.Contains(string(out), "acme.sh") && !strings.Contains(string(out), "3.") {
+		return "", fmt.Errorf("安装后校验 acme.sh 失败：--version 输出异常: %s", strings.TrimSpace(string(out)))
+	}
 	return installed, nil
+}
+
+// tightenAcmeHome enforces 0700 on a panel-managed acme home and 0600 on
+// the files that hold credentials. It only touches homes the panel owns
+// (acmeHome == certDir or inside it); a system-wide acme.sh found via PATH
+// is left alone.
+func (r *execAcmeRunner) tightenAcmeHome(acmeHome, certDir string) {
+	tightenAcmeHome(acmeHome, certDir)
+}
+
+func tightenAcmeHome(acmeHome, certDir string) {
+	home := filepath.Clean(strings.TrimSpace(acmeHome))
+	base := filepath.Clean(strings.TrimSpace(certDir))
+	if home == "" || base == "" {
+		return
+	}
+	if home != base && !strings.HasPrefix(home, base+string(os.PathSeparator)) {
+		return
+	}
+	_ = os.Chmod(home, 0700)
+	for _, name := range []string{"account.conf", "account.key"} {
+		_ = os.Chmod(filepath.Join(home, name), 0600)
+	}
 }
 
 func extractTarGz(r io.Reader, destDir string) error {
@@ -917,6 +1049,16 @@ func findExtractedAcmeScript(rootDir string) string {
 }
 
 func resolveHomeEnv(certDir string) string {
+	clean := filepath.Clean(strings.TrimSpace(certDir))
+	// Standard layout <home>/.acme.sh: HOME is the parent directory, which
+	// is what acme.sh itself assumes ($HOME/.acme.sh). This makes HOME
+	// deterministic instead of inheriting whatever the service was started
+	// with.
+	if filepath.Base(clean) == ".acme.sh" {
+		if parent := filepath.Dir(clean); parent != "" && parent != "." {
+			return parent
+		}
+	}
 	if h := strings.TrimSpace(os.Getenv("HOME")); h != "" {
 		return h
 	}
@@ -926,10 +1068,13 @@ func resolveHomeEnv(certDir string) string {
 	if os.Geteuid() == 0 {
 		return "/root"
 	}
-	if parent := filepath.Dir(filepath.Clean(certDir)); parent != "" && parent != "." {
+	if parent := filepath.Dir(clean); parent != "" && parent != "." {
 		return parent
 	}
-	return "/tmp"
+	// Never fall back to /tmp: a world-writable HOME would let acme.sh
+	// (or anything it shells out to) create files outside the panel's
+	// directories.
+	return clean
 }
 
 func envWithHome(baseEnv []string, homeVal string, extraEnv []string) []string {

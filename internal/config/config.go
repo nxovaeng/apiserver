@@ -16,6 +16,7 @@ type Config struct {
 	Database DatabaseConfig `yaml:"database"`
 	Xray     XrayConfig     `yaml:"xray"`
 	Nginx    NginxConfig    `yaml:"nginx"`
+	Acme     AcmeConfig     `yaml:"acme"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -62,6 +63,16 @@ type NginxConfig struct {
 	ReloadCmd string `yaml:"reload_cmd"`
 	TestCmd   string `yaml:"test_cmd"`
 	CertDir   string `yaml:"cert_dir"`
+}
+
+// AcmeConfig holds acme.sh auto-install settings. ArchiveURL/ArchiveSHA256
+// are empty by default, which means "use the pinned release baked into the
+// binary" (see internal/service defaultAcmeArchiveURL). A custom URL must
+// always come with its SHA-256, otherwise the download is refused.
+type AcmeConfig struct {
+	AutoInstall   *bool  `yaml:"auto_install"`
+	ArchiveURL    string `yaml:"archive_url"`
+	ArchiveSHA256 string `yaml:"archive_sha256"`
 }
 
 // Load reads configuration from a YAML file and applies safe defaults.
@@ -115,6 +126,10 @@ func (c *Config) applyDefaults() {
 	if c.Nginx.CertDir == "" {
 		c.Nginx.CertDir = "/root/.acme.sh"
 	}
+	if c.Acme.AutoInstall == nil {
+		v := true
+		c.Acme.AutoInstall = &v
+	}
 }
 
 // Validate checks configuration values for obvious problems.
@@ -130,12 +145,30 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("auth.bootstrap_tokens[%d] 不能为空", i)
 		}
 	}
+	if strings.TrimSpace(c.Acme.ArchiveURL) != "" && !strings.HasPrefix(c.Acme.ArchiveURL, "https://") {
+		return fmt.Errorf("acme.archive_url 必须为 https 地址")
+	}
+	if strings.TrimSpace(c.Acme.ArchiveSHA256) != "" {
+		h := strings.ToLower(strings.TrimSpace(c.Acme.ArchiveSHA256))
+		if len(h) != 64 {
+			return fmt.Errorf("acme.archive_sha256 必须为 64 位十六进制 SHA-256")
+		}
+		for _, ch := range h {
+			if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+				return fmt.Errorf("acme.archive_sha256 必须为 64 位十六进制 SHA-256")
+			}
+		}
+	}
 	return nil
 }
 
 // Default returns default server configuration.
 func Default() *Config {
+	autoInstall := true
 	return &Config{
+		Acme: AcmeConfig{
+			AutoInstall: &autoInstall,
+		},
 		Server: ServerConfig{
 			Listen: "127.0.0.1:8082",
 			Debug:  false,

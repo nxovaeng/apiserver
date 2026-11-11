@@ -33,3 +33,8 @@ nginx:
   stream_dir: "/etc/nginx/stream.d"      # 预留字段（当前版本仅生成 conf.d HTTP 反代配置）
   reload_cmd: "systemctl reload nginx"
   cert_dir: "/root/.acme.sh"
+
+acme:
+  auto_install: true   # 找不到 acme.sh 时是否自动下载安装；false 则只用已安装的，缺失时签发直接报错
+  # archive_url / archive_sha256 为空时使用内置 pin（acme.sh 3.1.6 + 其 SHA-256）；
+  # 自定义 URL 必须同时配 archive_sha256，否则下载会被拒绝。

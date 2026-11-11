@@ -104,20 +104,43 @@ install_dependencies() {
     success "基础依赖检查完成"
 }
 
+# Pinned acme.sh release (must match internal/service/domain_service.go
+# defaultAcmeVersion / defaultAcmeArchiveSHA256). Never use the master
+# branch: a floating ref with no integrity check would run as root.
+ACME_VERSION="3.1.6"
+ACME_ARCHIVE_URL="https://github.com/acmesh-official/acme.sh/archive/refs/tags/3.1.6.tar.gz"
+ACME_ARCHIVE_SHA256="0d3f9000ac44a6331314742a88c475f79134e24fc991997883652adc59efc486"
+
 install_acme() {
     local acme_home="/root/.acme.sh"
     if [[ -x "${acme_home}/acme.sh" ]] || command -v acme.sh &>/dev/null; then
         info "检测到已安装 acme.sh"
+        # The acme home holds account.conf with DNS API credentials: 0700
+        # even when acme.sh was installed by something else.
+        chmod 0700 "${acme_home}" 2>/dev/null || true
         return 0
     fi
 
-    info "安装 acme.sh 至 ${acme_home} (用于面板内置 DNS-01 证书签发)..."
+    info "安装 acme.sh ${ACME_VERSION} 至 ${acme_home} (用于面板内置 DNS-01 证书签发)..."
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    local archive_url="https://github.com/acmesh-official/acme.sh/archive/refs/heads/master.tar.gz"
-    if ! curl -fsSL --retry 3 -o "${tmp_dir}/acme.tar.gz" "${archive_url}"; then
+    if ! curl -fsSL --retry 3 -o "${tmp_dir}/acme.tar.gz" "${ACME_ARCHIVE_URL}"; then
         rm -rf "${tmp_dir}"
         warn "下载 acme.sh 失败，将在首次申请证书时再次尝试自动安装"
+        return 0
+    fi
+
+    # Verify the tarball before extracting anything from it.
+    if ! command -v sha256sum &>/dev/null; then
+        rm -rf "${tmp_dir}"
+        warn "缺少 sha256sum，无法校验 acme.sh 安装包，将在首次申请证书时再次尝试自动安装"
+        return 0
+    fi
+    local actual_sha
+    actual_sha="$(sha256sum "${tmp_dir}/acme.tar.gz" | awk '{print $1}')"
+    if [[ "${actual_sha}" != "${ACME_ARCHIVE_SHA256}" ]]; then
+        rm -rf "${tmp_dir}"
+        warn "acme.sh 安装包 SHA-256 校验失败（期望 ${ACME_ARCHIVE_SHA256}，实际 ${actual_sha}），已放弃安装"
         return 0
     fi
 
@@ -142,6 +165,11 @@ install_acme() {
     fi
 
     if (cd "$(dirname "${installer}")" && HOME=/root "${installer}" --install --home "${acme_home}" ${extra_args[@]+"${extra_args[@]}"}); then
+        # acme.sh's installer leaves the home 0755; account.conf inside
+        # holds DNS API credentials, so tighten it (and any existing dir).
+        chmod 0700 "${acme_home}"
+        chmod 0600 "${acme_home}/account.conf" 2>/dev/null || true
+        chmod 0600 "${acme_home}/account.key" 2>/dev/null || true
         success "acme.sh 安装完成 (${acme_home}/acme.sh)"
     else
         warn "acme.sh 预安装失败，面板将在首次申请证书时重试安装"
@@ -368,6 +396,9 @@ nginx:
   stream_dir: "${NGINX_STREAM_DIR}"
   reload_cmd: "systemctl reload nginx"
   cert_dir: "/root/.acme.sh"
+
+acme:
+  auto_install: true   # 找不到 acme.sh 时是否自动下载安装（内置 pin：3.1.6 + SHA-256 校验）
 EOF
     chmod 600 "${CONFIG_FILE}"
     success "配置文件已创建: ${CONFIG_FILE}"
