@@ -1,11 +1,40 @@
 package service
 
 import (
+	"path/filepath"
 	"testing"
 
+	"gorm.io/gorm"
+
+	"xray-panel-server/internal/config"
+	"xray-panel-server/internal/database"
 	"xray-panel-server/internal/dto"
 	"xray-panel-server/internal/models"
 )
+
+// setupTokenTestEnv builds a temp-dir DB + config for token tests.
+// (Moved here from the deleted lego pilot test file; the helper itself is
+// generic and has nothing to do with lego.)
+func setupTokenTestEnv(t *testing.T) (*gorm.DB, *config.Config, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	db, err := database.Init(filepath.Join(tmpDir, "panel.db"))
+	if err != nil {
+		t.Fatalf("database.Init: %v", err)
+	}
+	if err := database.Migrate(db); err != nil {
+		t.Fatalf("database.Migrate: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Database.Path = filepath.Join(tmpDir, "panel.db")
+	cfg.Nginx.CertDir = filepath.Join(tmpDir, "acme")
+	cfg.Nginx.ReloadCmd = "true"
+	cfg.Nginx.TestCmd = "true"
+
+	return db, cfg, tmpDir
+}
 
 func TestGenerateAPITokenSalted(t *testing.T) {
 	raw1, prefix1, hash1, salt1, err := models.GenerateAPIToken()
@@ -37,7 +66,7 @@ func TestGenerateAPITokenSalted(t *testing.T) {
 }
 
 func TestAuthenticateSaltedToken(t *testing.T) {
-	db, cfg, _ := setupLegoTestEnv(t)
+	db, cfg, _ := setupTokenTestEnv(t)
 	svc := NewTokenService(db, cfg, "test")
 
 	res, err := svc.Create(dto.CreateTokenRequest{Name: "test-token"})
@@ -68,7 +97,7 @@ func TestAuthenticateSaltedToken(t *testing.T) {
 }
 
 func TestAuthenticateLegacyTokenUpgrades(t *testing.T) {
-	db, cfg, _ := setupLegoTestEnv(t)
+	db, cfg, _ := setupTokenTestEnv(t)
 	raw, _, _, _, err := models.GenerateAPIToken()
 	if err != nil {
 		t.Fatalf("GenerateAPIToken: %v", err)
@@ -106,7 +135,7 @@ func TestAuthenticateLegacyTokenUpgrades(t *testing.T) {
 }
 
 func TestAuthenticateBootstrapUnchanged(t *testing.T) {
-	db, cfg, _ := setupLegoTestEnv(t)
+	db, cfg, _ := setupTokenTestEnv(t)
 	cfg.Auth.BootstrapTokens = []string{"xrp_bootstrap-test-token"}
 	svc := NewTokenService(db, cfg, "test")
 

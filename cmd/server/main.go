@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -92,12 +91,11 @@ func runServer(args []string) {
 		logger.Fatal("数据库初始化失败: %v", err)
 	}
 
-	// 证书续期 worker：每天检查一次证书过期时间，30 天内过期的按原签发
-	// 路径自动续期（见 internal/service/lego_acme.go）。失败只记日志，
-	// 不阻塞启动、不影响其它任务。
-	domainSvc := service.NewDomainService(db, cfg)
-	domainSvc.StartCertRenewalWorker(context.Background(), service.CertRenewalInterval)
-
+	// 证书续期不由本服务负责：acme.sh 首次签发时会把 DNS 凭证存进
+	// ~/.acme.sh/account.conf，其自带 cron（acme.sh --cron）到期自动续期。
+	// Go 原生 lego 试点已回退，原因见提交说明：CF token 不入库的前提下，
+	// lego 续期只能依赖服务启动时的环境变量，续不上；混用两种签发路径还会
+	// 让 acme.sh 的 cron 认不到 lego 签的证书。
 	logger.Info("正在启动 xray-panel-server v%s，监听地址: %s", Version, cfg.Server.Listen)
 	srv := api.NewServer(cfg, db, Version)
 	if err := srv.Run(); err != nil {
