@@ -72,7 +72,6 @@ type Generator struct {
 	inbounds             []models.Inbound
 	outbounds            []models.Outbound
 	rules                []models.RoutingRule
-	domains              map[string]models.Domain
 	apiPort              int
 	logLevel             string
 	socketDir            string
@@ -84,7 +83,6 @@ type Generator struct {
 // NewGenerator creates a new Server-mode Xray configuration generator.
 func NewGenerator() *Generator {
 	return &Generator{
-		domains:              make(map[string]models.Domain),
 		apiPort:              10085,
 		logLevel:             "warning",
 		socketDir:            "/dev/shm",
@@ -111,13 +109,6 @@ func (g *Generator) SetOutbounds(outbounds []models.Outbound) *Generator {
 
 func (g *Generator) SetRoutingRules(rules []models.RoutingRule) *Generator {
 	g.rules = rules
-	return g
-}
-
-func (g *Generator) SetDomains(domains []models.Domain) *Generator {
-	for _, d := range domains {
-		g.domains[d.ID] = d
-	}
 	return g
 }
 

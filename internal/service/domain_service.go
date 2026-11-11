@@ -84,7 +84,7 @@ func (s *DomainService) Create(req dto.UpsertDomainRequest) (*dto.DomainDTO, err
 		dtype = models.DomainType(req.Type)
 	}
 	if !isValidDomainType(dtype) {
-		return nil, NewValidationError("无效的域名类型，允许值: direct, cdn, reality")
+		return nil, NewValidationError("无效的域名类型，允许值: direct, cdn")
 	}
 
 	certPath := strings.TrimSpace(req.CertPath)
@@ -108,17 +108,12 @@ func (s *DomainService) Create(req dto.UpsertDomainRequest) (*dto.DomainDTO, err
 	}
 
 	domain := models.Domain{
-		Domain:      domainName,
-		Type:        dtype,
-		IsWildcard:  isWildcard,
-		ServerName:  strings.TrimSpace(req.ServerName),
-		Fingerprint: strings.TrimSpace(req.Fingerprint),
-		ShortID:     strings.TrimSpace(req.ShortID),
-		PrivateKey:  strings.TrimSpace(req.PrivateKey),
-		PublicKey:   strings.TrimSpace(req.PublicKey),
-		CertPath:    certPath,
-		KeyPath:     keyPath,
-		Enabled:     enabled,
+		Domain:     domainName,
+		Type:       dtype,
+		IsWildcard: isWildcard,
+		CertPath:   certPath,
+		KeyPath:    keyPath,
+		Enabled:    enabled,
 	}
 
 	if err := s.db.Create(&domain).Error; err != nil {
@@ -148,7 +143,7 @@ func (s *DomainService) Update(id string, req dto.UpsertDomainRequest) (*dto.Dom
 		dtype = models.DomainType(req.Type)
 	}
 	if !isValidDomainType(dtype) {
-		return nil, NewValidationError("无效的域名类型，允许值: direct, cdn, reality")
+		return nil, NewValidationError("无效的域名类型，允许值: direct, cdn")
 	}
 
 	certPath := strings.TrimSpace(req.CertPath)
@@ -169,15 +164,6 @@ func (s *DomainService) Update(id string, req dto.UpsertDomainRequest) (*dto.Dom
 	domain.Domain = domainName
 	domain.Type = dtype
 	domain.IsWildcard = isWildcard
-	domain.ServerName = strings.TrimSpace(req.ServerName)
-	domain.Fingerprint = strings.TrimSpace(req.Fingerprint)
-	domain.ShortID = strings.TrimSpace(req.ShortID)
-	if strings.TrimSpace(req.PrivateKey) != "" {
-		domain.PrivateKey = strings.TrimSpace(req.PrivateKey)
-	}
-	if strings.TrimSpace(req.PublicKey) != "" {
-		domain.PublicKey = strings.TrimSpace(req.PublicKey)
-	}
 	domain.CertPath = certPath
 	domain.KeyPath = keyPath
 	if req.Enabled != nil {
@@ -1079,7 +1065,7 @@ func validateDomainFormat(domain string) bool {
 }
 
 func isValidDomainType(t models.DomainType) bool {
-	return t == models.DomainTypeDirect || t == models.DomainTypeCDN || t == models.DomainTypeReality
+	return t == models.DomainTypeDirect || t == models.DomainTypeCDN
 }
 
 func validateCertificatePaths(certPath, keyPath string) error {
@@ -1113,20 +1099,15 @@ func dirExists(path string) bool {
 
 func toDomainDTO(d models.Domain) dto.DomainDTO {
 	dto := dto.DomainDTO{
-		ID:            d.ID,
-		Domain:        d.Domain,
-		Type:          string(d.Type),
-		IsWildcard:    d.IsWildcard,
-		ServerName:    d.ServerName,
-		Fingerprint:   d.Fingerprint,
-		ShortID:       d.ShortID,
-		HasPrivateKey: d.PrivateKey != "",
-		PublicKey:     d.PublicKey,
-		CertPath:      d.CertPath,
-		KeyPath:       d.KeyPath,
-		Enabled:       d.Enabled,
-		CreatedAt:     d.CreatedAt,
-		UpdatedAt:     d.UpdatedAt,
+		ID:         d.ID,
+		Domain:     d.Domain,
+		Type:       string(d.Type),
+		IsWildcard: d.IsWildcard,
+		CertPath:   d.CertPath,
+		KeyPath:    d.KeyPath,
+		Enabled:    d.Enabled,
+		CreatedAt:  d.CreatedAt,
+		UpdatedAt:  d.UpdatedAt,
 	}
 
 	if d.CertPath != "" {

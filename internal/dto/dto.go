@@ -439,11 +439,6 @@ type DomainDTO struct {
 	Domain         string     `json:"domain"`
 	Type           string     `json:"type"`
 	IsWildcard     bool       `json:"is_wildcard"`
-	ServerName     string     `json:"server_name"`
-	Fingerprint    string     `json:"fingerprint"`
-	ShortID        string     `json:"short_id"`
-	HasPrivateKey  bool       `json:"has_private_key"`
-	PublicKey      string     `json:"public_key"`
 	CertPath       string     `json:"cert_path"`
 	KeyPath        string     `json:"key_path"`
 	Enabled        bool       `json:"enabled"`
@@ -461,17 +456,12 @@ type DomainListResponse struct {
 }
 
 type UpsertDomainRequest struct {
-	Domain      string `json:"domain" binding:"required"`
-	Type        string `json:"type"`
-	IsWildcard  bool   `json:"is_wildcard"`
-	ServerName  string `json:"server_name"`
-	Fingerprint string `json:"fingerprint"`
-	ShortID     string `json:"short_id"`
-	PrivateKey  string `json:"private_key"`
-	PublicKey   string `json:"public_key"`
-	CertPath    string `json:"cert_path"`
-	KeyPath     string `json:"key_path"`
-	Enabled     *bool  `json:"enabled"`
+	Domain     string `json:"domain" binding:"required"`
+	Type       string `json:"type"`
+	IsWildcard bool   `json:"is_wildcard"`
+	CertPath   string `json:"cert_path"`
+	KeyPath    string `json:"key_path"`
+	Enabled    *bool  `json:"enabled"`
 }
 
 type CertificateInfo struct {

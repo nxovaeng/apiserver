@@ -3129,7 +3129,7 @@ components:
     # ===== Domains & Certificates =====
     DomainType:
       type: string
-      enum: [direct, cdn, reality]
+      enum: [direct, cdn]
 
     DomainDTO:
       type: object
@@ -3138,11 +3138,6 @@ components:
         - domain
         - type
         - is_wildcard
-        - server_name
-        - fingerprint
-        - short_id
-        - has_private_key
-        - public_key
         - cert_path
         - key_path
         - enabled
@@ -3159,16 +3154,6 @@ components:
           $ref: "#/components/schemas/DomainType"
         is_wildcard:
           type: boolean
-        server_name:
-          type: string
-        fingerprint:
-          type: string
-        short_id:
-          type: string
-        has_private_key:
-          type: boolean
-        public_key:
-          type: string
         cert_path:
           type: string
         key_path:
@@ -3236,16 +3221,6 @@ components:
           default: direct
         is_wildcard:
           type: boolean
-        server_name:
-          type: string
-        fingerprint:
-          type: string
-        short_id:
-          type: string
-        private_key:
-          type: string
-        public_key:
-          type: string
         cert_path:
           type: string
         key_path:

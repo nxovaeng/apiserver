@@ -447,13 +447,11 @@ func (s *SystemService) GenerateXrayConfig() (*xray.Config, []byte, error) {
 	var inbounds []models.Inbound
 	var outbounds []models.Outbound
 	var rules []models.RoutingRule
-	var domains []models.Domain
 
 	s.db.Where("enabled = ?", true).Find(&users)
 	s.db.Preload("Domain").Where("enabled = ?", true).Find(&inbounds)
 	s.db.Where("enabled = ?", true).Find(&outbounds)
 	s.db.Where("enabled = ?", true).Order("priority ASC").Find(&rules)
-	s.db.Where("enabled = ?", true).Find(&domains)
 
 	apiPort := 10085
 	socketDir := "/dev/shm"
@@ -471,7 +469,6 @@ func (s *SystemService) GenerateXrayConfig() (*xray.Config, []byte, error) {
 		SetInbounds(inbounds).
 		SetOutbounds(outbounds).
 		SetRoutingRules(rules).
-		SetDomains(domains).
 		SetAPIPort(apiPort).
 		SetSocketDir(socketDir).
 		SetLogLevel(models.GetXrayLogLevel(s.db)).

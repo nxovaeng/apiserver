@@ -35,7 +35,7 @@ func Init(dbPath string) (*gorm.DB, error) {
 
 // Migrate runs auto-migrations for all server models.
 func Migrate(db *gorm.DB) error {
-	return db.AutoMigrate(
+	if err := db.AutoMigrate(
 		&models.APIToken{},
 		&models.User{},
 		&models.Domain{},
@@ -46,7 +46,20 @@ func Migrate(db *gorm.DB) error {
 		&models.Setting{},
 		&models.WGServerConfig{},
 		&models.WGPeer{},
-	)
+	); err != nil {
+		return err
+	}
+
+	// Reality 入站已移除：停用历史上建的 reality 域名。行保留在库里（可手动删除
+	// 或改建为 direct/cdn），仅不再参与启用逻辑。AutoMigrate 不删列，残留的
+	// server_name/fingerprint/short_id/private_key/public_key 列随之成为孤儿列。
+	if res := db.Model(&models.Domain{}).Where("type = ?", "reality").Update("enabled", false); res.Error != nil {
+		return res.Error
+	} else if res.RowsAffected > 0 {
+		applogger.Warn("已停用 %d 个历史 Reality 域名（入站 Reality 已移除），请手动删除或改建为 direct/cdn", res.RowsAffected)
+	}
+
+	return nil
 }
 
 // SeedResult reports whether an initial API token was seeded during Seed.
