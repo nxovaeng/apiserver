@@ -118,3 +118,25 @@ func TestAPIConfigTmplExposesAPIWithSSEAndBlocksRoot(t *testing.T) {
 		t.Errorf("expected default root to return 404")
 	}
 }
+
+func TestConfigGeneratorTestConfigBehavior(t *testing.T) {
+	tmpDir := t.TempDir()
+	gen := NewGenerator(tmpDir, tmpDir)
+
+	// Temp dir with default "nginx -t" must skip host /etc/nginx/nginx.conf check
+	if err := gen.TestConfig(); err != nil {
+		t.Fatalf("expected temp dir TestConfig to skip host nginx -t safely, got: %v", err)
+	}
+
+	// Explicit failing command must return error
+	gen.SetTestCmd("false")
+	if err := gen.TestConfig(); err == nil {
+		t.Fatalf("expected failing explicit testCmd to return error")
+	}
+
+	// Explicit "true" passes
+	gen.SetTestCmd("true")
+	if err := gen.TestConfig(); err != nil {
+		t.Fatalf("expected 'true' testCmd to succeed, got: %v", err)
+	}
+}

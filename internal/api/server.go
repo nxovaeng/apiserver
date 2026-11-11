@@ -48,6 +48,9 @@ func NewServer(cfg *config.Config, db *gorm.DB, version string) *Server {
 	if cfg.Nginx.ReloadCmd != "" {
 		nginxGen.SetReloadCmd(cfg.Nginx.ReloadCmd)
 	}
+	if cfg.Nginx.TestCmd != "" {
+		nginxGen.SetTestCmd(cfg.Nginx.TestCmd)
+	}
 
 	tokenSvc := service.NewTokenService(db, cfg, version)
 	userSvc := service.NewUserService(db)

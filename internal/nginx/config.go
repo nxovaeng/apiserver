@@ -23,6 +23,7 @@ type ConfigGenerator struct {
 	configDir   string
 	streamDir   string
 	reloadCmd   string
+	testCmd     string
 	db          *gorm.DB
 	socketDir   string
 	panelListen string
@@ -34,6 +35,7 @@ func NewGenerator(configDir, streamDir string) *ConfigGenerator {
 		configDir:   configDir,
 		streamDir:   streamDir,
 		reloadCmd:   "systemctl reload nginx",
+		testCmd:     "nginx -t",
 		socketDir:   "/dev/shm",
 		panelListen: "127.0.0.1:8082",
 	}
@@ -51,6 +53,11 @@ func (g *ConfigGenerator) SetReloadCmd(cmd string) {
 	if cmd != "" {
 		g.reloadCmd = cmd
 	}
+}
+
+// SetTestCmd overrides the Nginx config syntax verification command (default "nginx -t").
+func (g *ConfigGenerator) SetTestCmd(cmd string) {
+	g.testCmd = strings.TrimSpace(cmd)
 }
 
 func (g *ConfigGenerator) SetSocketDir(dir string) {
@@ -398,12 +405,28 @@ func (g *ConfigGenerator) CleanupSubscriptionConfigs() error {
 	return g.CleanupSubscriptionConfigsExcept("", false)
 }
 
-// TestConfig validates nginx syntax when nginx binary is available.
+// TestConfig validates nginx syntax when running against system Nginx config or an explicit test command.
+// When using a non-system temp directory (or reload/test mocked to "true"/"none"), host /etc/nginx/nginx.conf is skipped.
 func (g *ConfigGenerator) TestConfig() error {
-	if _, err := exec.LookPath("nginx"); err != nil {
+	testCmd := strings.TrimSpace(g.testCmd)
+	if testCmd == "" || testCmd == "true" || testCmd == "none" {
 		return nil
 	}
-	out, err := exec.Command("nginx", "-t").CombinedOutput()
+	if testCmd == "nginx -t" {
+		// Never run system `nginx -t` (which touches /etc/nginx/nginx.conf and /run/nginx.pid)
+		// during tests using temporary directories or mocked reload commands.
+		if strings.TrimSpace(g.reloadCmd) == "true" || filepath.Clean(g.configDir) != "/etc/nginx/conf.d" {
+			return nil
+		}
+		if _, err := exec.LookPath("nginx"); err != nil {
+			return nil
+		}
+	}
+	parts := strings.Fields(testCmd)
+	if len(parts) == 0 {
+		return nil
+	}
+	out, err := exec.Command(parts[0], parts[1:]...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
 	}

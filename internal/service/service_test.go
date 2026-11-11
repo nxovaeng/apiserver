@@ -45,6 +45,7 @@ func setupTestEnv(t *testing.T) (*gorm.DB, *config.Config, string) {
 	cfg.Nginx.StreamDir = filepath.Join(tmpDir, "nginx", "stream.d")
 	cfg.Nginx.CertDir = filepath.Join(tmpDir, "acme")
 	cfg.Nginx.ReloadCmd = "true"
+	cfg.Nginx.TestCmd = "true"
 	cfg.Xray.ConfigPath = filepath.Join(tmpDir, "xray", "config.json")
 	cfg.Xray.AssetsPath = filepath.Join(tmpDir, "xray-assets")
 	cfg.Xray.SocketDir = tmpDir

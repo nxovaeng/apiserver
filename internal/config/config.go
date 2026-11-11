@@ -60,6 +60,7 @@ type NginxConfig struct {
 	ConfigDir string `yaml:"config_dir"`
 	StreamDir string `yaml:"stream_dir"`
 	ReloadCmd string `yaml:"reload_cmd"`
+	TestCmd   string `yaml:"test_cmd"`
 	CertDir   string `yaml:"cert_dir"`
 }
 
@@ -107,6 +108,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Nginx.ReloadCmd == "" {
 		c.Nginx.ReloadCmd = "systemctl reload nginx"
+	}
+	if c.Nginx.TestCmd == "" {
+		c.Nginx.TestCmd = "nginx -t"
 	}
 	if c.Nginx.CertDir == "" {
 		c.Nginx.CertDir = "/root/.acme.sh"
@@ -163,6 +167,7 @@ func Default() *Config {
 			ConfigDir: "/etc/nginx/conf.d",
 			StreamDir: "/etc/nginx/stream.d",
 			ReloadCmd: "systemctl reload nginx",
+			TestCmd:   "nginx -t",
 			CertDir:   "/root/.acme.sh",
 		},
 	}
