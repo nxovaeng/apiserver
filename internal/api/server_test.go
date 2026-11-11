@@ -1,0 +1,293 @@
+package api_test
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"xray-panel-server/internal/api"
+	"xray-panel-server/internal/config"
+	"xray-panel-server/internal/database"
+	"xray-panel-server/internal/dto"
+	"xray-panel-server/internal/models"
+)
+
+func setupTestServer(t *testing.T) (*api.Server, string, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	dbPath := filepath.Join(tmpDir, "panel.db")
+	db, err := database.Init(dbPath)
+	if err != nil {
+		t.Fatalf("database.Init: %v", err)
+	}
+	if err := database.Migrate(db); err != nil {
+		t.Fatalf("database.Migrate: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Database.Path = dbPath
+	cfg.Auth.FailLimit = 3
+	cfg.Auth.FailWindowMinutes = 5
+	cfg.Nginx.ConfigDir = filepath.Join(tmpDir, "nginx", "conf.d")
+	cfg.Nginx.StreamDir = filepath.Join(tmpDir, "nginx", "stream.d")
+	cfg.Nginx.CertDir = filepath.Join(tmpDir, "acme")
+	cfg.Nginx.ReloadCmd = "true"
+	cfg.Xray.ConfigPath = filepath.Join(tmpDir, "xray", "config.json")
+	cfg.Xray.AssetsPath = filepath.Join(tmpDir, "xray-assets")
+	cfg.Xray.SocketDir = tmpDir
+
+	seedRes, err := database.Seed(db, cfg)
+	if err != nil {
+		t.Fatalf("database.Seed: %v", err)
+	}
+
+	srv := api.NewServer(cfg, db, "1.0.0-test")
+	return srv, seedRes.InitialTokenPlaintext, tmpDir
+}
+
+func doRequest(t *testing.T, handler http.Handler, method, path, token string, body interface{}, remoteAddr string) *httptest.ResponseRecorder {
+	t.Helper()
+	var bodyReader *bytes.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal request: %v", err)
+		}
+		bodyReader = bytes.NewReader(raw)
+	} else {
+		bodyReader = bytes.NewReader(nil)
+	}
+
+	req := httptest.NewRequest(method, path, bodyReader)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if remoteAddr != "" {
+		req.RemoteAddr = remoteAddr
+	} else {
+		req.RemoteAddr = "198.51.100.10:12345"
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestAuthMiddlewareSecurityAndRateLimit(t *testing.T) {
+	srv, token, _ := setupTestServer(t)
+	h := srv.Handler()
+
+	// 1. Health endpoint is public
+	rec := doRequest(t, h, http.MethodGet, "/api/v1/health", "", nil, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /api/v1/health, got %d", rec.Code)
+	}
+	var health dto.HealthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &health); err != nil || health.Status != "ok" {
+		t.Fatalf("unexpected health response: %s", rec.Body.String())
+	}
+
+	// 2. Protected route without token -> 401 UNAUTHORIZED JSON (no 302 redirect!)
+	rec = doRequest(t, h, http.MethodGet, "/api/v1/auth/verify", "", nil, "203.0.113.1:5000")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without token, got %d", rec.Code)
+	}
+	var errResp dto.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil || errResp.Success || errResp.Error.Code != dto.ErrUnauthorized {
+		t.Fatalf("unexpected error payload: %s", rec.Body.String())
+	}
+
+	// 3. Query param token must be rejected even if Authorization header is also present
+	rec = doRequest(t, h, http.MethodGet, "/api/v1/auth/verify?token="+token, token, nil, "203.0.113.2:5000")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when token passed in query string, got %d", rec.Code)
+	}
+
+	// 4. Sliding-window rate limit after FailLimit (3) failed attempts from same IP
+	attackerIP := "203.0.113.99:4000"
+	for i := 0; i < 3; i++ {
+		rec = doRequest(t, h, http.MethodGet, "/api/v1/dashboard", "xrp_wrong_token", nil, attackerIP)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: expected 401, got %d", i+1, rec.Code)
+		}
+	}
+	rec = doRequest(t, h, http.MethodGet, "/api/v1/dashboard", token, nil, attackerIP)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 rate limit after 3 failures, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil || errResp.Error.Code != dto.ErrRateLimited {
+		t.Fatalf("expected RATE_LIMITED error code, got %s", rec.Body.String())
+	}
+
+	// 5. Valid token from normal IP succeeds
+	rec = doRequest(t, h, http.MethodGet, "/api/v1/auth/verify", token, nil, "198.51.100.20:1000")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /api/v1/auth/verify, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEndToEndRESTAndDynamicSubscription(t *testing.T) {
+	srv, token, _ := setupTestServer(t)
+	h := srv.Handler()
+
+	// 1. Configure server_public_host & sub_domain
+	pubHost := "node1.example.com"
+	rec := doRequest(t, h, http.MethodPut, "/api/v1/settings", token, dto.UpdateSettingsRequest{
+		ServerPublicHost: &pubHost,
+	}, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/v1/settings: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 2. Create user
+	rec = doRequest(t, h, http.MethodPost, "/api/v1/users", token, dto.CreateUserRequest{
+		Name:              "TestUser",
+		Email:             "test@example.com",
+		TrafficLimitBytes: 10 * 1024 * 1024 * 1024,
+	}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /api/v1/users: %d %s", rec.Code, rec.Body.String())
+	}
+	var userEnv dto.Envelope[dto.UserDTO]
+	if err := json.Unmarshal(rec.Body.Bytes(), &userEnv); err != nil {
+		t.Fatal(err)
+	}
+	user := userEnv.Data
+	if !strings.HasPrefix(user.SubURLs.Base64, "https://node1.example.com/d/") {
+		t.Fatalf("unexpected user sub_url: %+v", user.SubURLs)
+	}
+
+	// 3. Create VLESS XHTTP inbound with custom_sni AND a WireGuard inbound (excluded from sub)
+	rec = doRequest(t, h, http.MethodPost, "/api/v1/inbounds", token, dto.UpsertInboundRequest{
+		Tag:       "edge-xhttp",
+		Protocol:  "vless",
+		Transport: "xhttp",
+		Path:      "/xhttp-test",
+		CustomSNI: "cdn.example.com",
+	}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /api/v1/inbounds (vless): %d %s", rec.Code, rec.Body.String())
+	}
+
+	priv, _, _ := models.GenerateWGKeyPair()
+	rec = doRequest(t, h, http.MethodPost, "/api/v1/inbounds", token, dto.UpsertInboundRequest{
+		Tag:         "wg-relay",
+		Protocol:    "wireguard",
+		Port:        51822,
+		WGSecretKey: priv,
+	}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /api/v1/inbounds (wireguard): %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 4. Create Outbound + Routing Preset
+	rec = doRequest(t, h, http.MethodPost, "/api/v1/outbounds", token, dto.UpsertOutboundRequest{
+		Tag:    "local-socks",
+		Type:   "socks5",
+		Server: "127.0.0.1",
+		Port:   1080,
+	}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /api/v1/outbounds: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doRequest(t, h, http.MethodPost, "/api/v1/routing/preset/china-direct", token, nil, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/v1/routing/preset/china-direct: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 5. Check Dashboard & Xray Config preview
+	rec = doRequest(t, h, http.MethodGet, "/api/v1/dashboard", token, nil, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/dashboard: %d %s", rec.Code, rec.Body.String())
+	}
+	var dashEnv dto.Envelope[dto.DashboardResponse]
+	if err := json.Unmarshal(rec.Body.Bytes(), &dashEnv); err != nil {
+		t.Fatal(err)
+	}
+	if dashEnv.Data.Users.Total != 1 || dashEnv.Data.Inbounds.Total != 2 || dashEnv.Data.Outbounds.Total != 1 {
+		t.Fatalf("unexpected dashboard counts: %+v", dashEnv.Data)
+	}
+
+	rec = doRequest(t, h, http.MethodGet, "/api/v1/xray/config", token, nil, "")
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "socks-in") {
+		t.Fatalf("GET /api/v1/xray/config unexpected: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 6. Test public subscription formats under default /d/{sub_path}
+	rec = doRequest(t, h, http.MethodGet, "/d/"+user.SubPath, "", nil, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /d/%s: %d %s", user.SubPath, rec.Code, rec.Body.String())
+	}
+	decoded, err := base64.StdEncoding.DecodeString(rec.Body.String())
+	if err != nil {
+		t.Fatalf("invalid base64 subscription: %v", err)
+	}
+	if !strings.Contains(string(decoded), "vless://"+user.UUID+"@cdn.example.com:443") || strings.Contains(string(decoded), "wg-relay") {
+		t.Fatalf("unexpected decoded subscription links: %s", string(decoded))
+	}
+	if rec.Header().Get("Subscription-Userinfo") == "" {
+		t.Errorf("expected Subscription-Userinfo header")
+	}
+
+	// JSON and YAML formats
+	rec = doRequest(t, h, http.MethodGet, "/d/"+user.SubPath+"/json", "", nil, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"count":1`) {
+		t.Fatalf("unexpected JSON subscription: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doRequest(t, h, http.MethodGet, "/d/"+user.SubPath+"/yaml", "", nil, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "type: vless") {
+		t.Fatalf("unexpected YAML subscription: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 7. Dynamic sub_path change takes effect IMMEDIATELY without restarting server
+	newPrefix := "/vip-feed"
+	rec = doRequest(t, h, http.MethodPut, "/api/v1/settings", token, dto.UpdateSettingsRequest{SubPath: &newPrefix}, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/v1/settings sub_path: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Old prefix must return 404 now
+	rec = doRequest(t, h, http.MethodGet, "/d/"+user.SubPath, "", nil, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on old sub_path /d, got %d", rec.Code)
+	}
+
+	// New prefix must return 200 immediately
+	rec = doRequest(t, h, http.MethodGet, "/vip-feed/"+user.SubPath+"/txt", "", nil, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "vless://") {
+		t.Fatalf("expected 200 on new sub_path /vip-feed, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 8. Disabled user receives 403 Forbidden
+	rec = doRequest(t, h, http.MethodPost, "/api/v1/users/"+user.ID+"/toggle", token, nil, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("toggle user failed: %d", rec.Code)
+	}
+	rec = doRequest(t, h, http.MethodGet, "/vip-feed/"+user.SubPath, "", nil, "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for disabled user subscription, got %d", rec.Code)
+	}
+
+	// 9. Subscription rate limit (30 req/min)
+	subIP := "198.51.100.77:9999"
+	for i := 0; i < 30; i++ {
+		rec = doRequest(t, h, http.MethodGet, "/vip-feed/"+user.SubPath, "", nil, subIP)
+		if rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("rate limited early at request %d", i+1)
+		}
+	}
+	rec = doRequest(t, h, http.MethodGet, "/vip-feed/"+user.SubPath, "", nil, subIP)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on 31st subscription request within 1m, got %d", rec.Code)
+	}
+}

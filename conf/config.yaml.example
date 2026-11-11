@@ -1,0 +1,35 @@
+# Xray Panel Server 配置文件示例
+# 复制此文件为 config.yaml 并按实际情况修改
+
+server:
+  listen: "127.0.0.1:8082"   # 建议只监听本地，通过 SSH 隧道或 Nginx TLS 反代访问
+  debug: false
+
+auth:
+  bootstrap_tokens: []        # 可选：静态引导 Token（适合容器/自动化部署），格式 "xrp_..."
+  fail_limit: 15              # 滑窗内允许的最大认证失败次数
+  fail_window_minutes: 5      # 认证失败滑窗限流时间（分钟）
+
+log:
+  level: "info"               # debug / info / warning / error
+  file: "/opt/xray-panel/logs/panel.log"
+  max_size: 100               # 单文件最大 MB
+  max_backups: 7
+  max_age: 30                 # 旧日志保留天数
+  compress: true
+
+database:
+  path: "/opt/xray-panel/data/panel.db"
+
+xray:
+  binary_path: "/usr/local/bin/xray"
+  config_path: "/usr/local/etc/xray/config.json"
+  assets_path: "/usr/local/share/xray"   # geoip.dat / geosite.dat
+  api_port: 10085
+  socket_dir: "/dev/shm"     # UDS 目录，/dev/shm 性能更好
+
+nginx:
+  config_dir: "/etc/nginx/conf.d"
+  stream_dir: "/etc/nginx/stream.d"      # 预留字段（当前版本仅生成 conf.d HTTP 反代配置）
+  reload_cmd: "systemctl reload nginx"
+  cert_dir: "/root/.acme.sh"

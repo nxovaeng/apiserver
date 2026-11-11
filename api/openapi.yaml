@@ -1,0 +1,3831 @@
+openapi: 3.0.3
+info:
+  title: Xray Panel Server API
+  version: 1.0.0
+  description: |
+    Headless RESTful API contract for `xray-panel-server`, aligned with `xray-panel-desktop`.
+    Pure Server-mode Xray/Nginx/WireGuard management with static Bearer API Token authentication.
+
+servers:
+  - url: http://127.0.0.1:8082
+    description: Local or SSH-tunneled backend server
+  - url: https://{domain}
+    description: HTTPS reverse-proxied backend server
+    variables:
+      domain:
+        default: panel.example.com
+
+tags:
+  - name: Health
+    description: Service health probes
+  - name: Auth & Tokens
+    description: Static Bearer API token verification and lifecycle management
+  - name: Dashboard
+    description: System metrics, service states, and traffic summaries
+  - name: Users
+    description: Proxy user management and traffic quota controls
+  - name: Inbounds
+    description: Xray inbound configuration and Nginx integration
+  - name: Outbounds
+    description: Xray outbound configuration, share-link import, and real dial testing
+  - name: Routing
+    description: Xray routing rules, presets, and GeoData discovery
+  - name: Domains
+    description: Domain management and TLS/ACME certificate scanning
+  - name: WireGuard
+    description: Linux kernel WireGuard (wg0) server and peer management
+  - name: Xray & System
+    description: Xray service lifecycle, settings, panel restart, and service logs
+  - name: Subscriptions
+    description: Public unauthenticated user subscription endpoints
+
+security:
+  - BearerAuth: []
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [Health]
+      summary: Health check
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /api/v1/auth/verify:
+    get:
+      tags: [Auth & Tokens]
+      summary: Verify current Bearer API token and inspect server metadata
+      operationId: verifyAuth
+      responses:
+        "200":
+          description: Token is valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthVerifyEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/tokens:
+    get:
+      tags: [Auth & Tokens]
+      summary: List API tokens (hashed secrets are never returned)
+      operationId: listTokens
+      responses:
+        "200":
+          description: List of API tokens
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenListEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [Auth & Tokens]
+      summary: Issue a new API token (plaintext is returned only once)
+      operationId: createToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTokenRequest"
+      responses:
+        "201":
+          description: Token created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateTokenEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/tokens/{id}:
+    delete:
+      tags: [Auth & Tokens]
+      summary: Revoke (or permanently purge) an API token
+      operationId: deleteToken
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+        - name: purge
+          in: query
+          description: When true, permanently delete the record instead of only marking revoked=true
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Token revoked or deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenDeleteEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/dashboard:
+    get:
+      tags: [Dashboard]
+      summary: Get server dashboard metrics, monthly traffic, and service status
+      operationId: getDashboard
+      responses:
+        "200":
+          description: Dashboard summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/users:
+    get:
+      tags: [Users]
+      summary: List users (optionally filtered by name/email search query)
+      operationId: listUsers
+      parameters:
+        - name: q
+          in: query
+          description: Case-insensitive substring filter on user name or email
+          schema:
+            type: string
+      responses:
+        "200":
+          description: User list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserListEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [Users]
+      summary: Create a proxy user
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserRequest"
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/users/{id}:
+    get:
+      tags: [Users]
+      summary: Get user by ID
+      operationId: getUser
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: User details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Users]
+      summary: Update a user (preserves sub_path, traffic_used, traffic_reset, created_at)
+      operationId: updateUser
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+      responses:
+        "200":
+          description: User updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [Users]
+      summary: Delete a user
+      operationId: deleteUser
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: User deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/users/{id}/toggle:
+    post:
+      tags: [Users]
+      summary: Toggle user enabled status
+      operationId: toggleUser
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: User toggled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/users/{id}/reset-traffic:
+    post:
+      tags: [Users]
+      summary: Reset user traffic_used counter to 0
+      operationId: resetUserTraffic
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Traffic reset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/inbounds:
+    get:
+      tags: [Inbounds]
+      summary: List Xray inbounds
+      operationId: listInbounds
+      responses:
+        "200":
+          description: Inbound list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboundListEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Inbounds]
+      summary: Create an Xray inbound (handles wildcard subdomain generation and Nginx sync)
+      operationId: createInbound
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertInboundRequest"
+      responses:
+        "201":
+          description: Inbound created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboundEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/inbounds/{id}:
+    get:
+      tags: [Inbounds]
+      summary: Get inbound by ID
+      operationId: getInbound
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Inbound details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboundEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Inbounds]
+      summary: Update an inbound (preserves wg_secret_key when omitted/empty; syncs Nginx)
+      operationId: updateInbound
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertInboundRequest"
+      responses:
+        "200":
+          description: Inbound updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboundEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [Inbounds]
+      summary: Delete an inbound and cleanup its managed Nginx configurations
+      operationId: deleteInbound
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Inbound deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/inbounds/{id}/toggle:
+    post:
+      tags: [Inbounds]
+      summary: Toggle inbound enabled status
+      operationId: toggleInbound
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Inbound toggled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboundEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/inbounds/{id}/wg-client:
+    get:
+      tags: [Inbounds]
+      summary: Generate WireGuard client reference config for a WireGuard relay inbound
+      operationId: getInboundWGClientConfig
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: WireGuard client reference configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboundWGClientConfigEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/outbounds:
+    get:
+      tags: [Outbounds]
+      summary: List Xray outbounds
+      operationId: listOutbounds
+      responses:
+        "200":
+          description: Outbound list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OutboundListEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Outbounds]
+      summary: Create an Xray outbound
+      operationId: createOutbound
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertOutboundRequest"
+      responses:
+        "201":
+          description: Outbound created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OutboundEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/outbounds/import:
+    post:
+      tags: [Outbounds]
+      summary: Parse a vless://, vmess://, or trojan:// share link and create an outbound
+      operationId: importOutboundShareLink
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportShareLinkRequest"
+      responses:
+        "201":
+          description: Outbound imported
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OutboundEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/outbounds/parse-wireguard:
+    post:
+      tags: [Outbounds]
+      summary: Parse a WireGuard .conf text snippet into structured outbound fields
+      operationId: parseWireGuardConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ParseWireGuardConfigRequest"
+      responses:
+        "200":
+          description: Parsed WireGuard fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParsedWireGuardConfigEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/outbounds/generate-wg-keys:
+    post:
+      tags: [Outbounds]
+      summary: Generate a Curve25519 key pair for WireGuard outbound/inbound configuration
+      operationId: generateOutboundWGKeys
+      responses:
+        "200":
+          description: Generated key pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGKeyPairEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/outbounds/{id}:
+    get:
+      tags: [Outbounds]
+      summary: Get outbound by ID
+      operationId: getOutbound
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Outbound details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OutboundEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Outbounds]
+      summary: Update an outbound (empty password/wg_secret_key/trojan_password keeps existing values)
+      operationId: updateOutbound
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertOutboundRequest"
+      responses:
+        "200":
+          description: Outbound updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OutboundEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [Outbounds]
+      summary: Delete an outbound
+      operationId: deleteOutbound
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Outbound deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/outbounds/{id}/toggle:
+    post:
+      tags: [Outbounds]
+      summary: Toggle outbound enabled status
+      operationId: toggleOutbound
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Outbound toggled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OutboundEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/outbounds/{id}/test:
+    post:
+      tags: [Outbounds]
+      summary: Execute a real dial test through an ephemeral Xray process for this outbound
+      operationId: testOutbound
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Outbound connectivity test result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OutboundTestEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/routing:
+    get:
+      tags: [Routing]
+      summary: List routing rules ordered by priority
+      operationId: listRoutingRules
+      responses:
+        "200":
+          description: Routing rules list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingRuleListEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Routing]
+      summary: Create a routing rule
+      operationId: createRoutingRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertRoutingRuleRequest"
+      responses:
+        "201":
+          description: Routing rule created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingRuleEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/routing/geodata:
+    get:
+      tags: [Routing]
+      summary: Parse geosite.dat and geoip.dat tags/country codes from Xray assets directory
+      operationId: getGeoData
+      responses:
+        "200":
+          description: GeoData tags and codes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeoDataEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/routing/preset/{preset}:
+    post:
+      tags: [Routing]
+      summary: Import a preset routing rule template
+      operationId: importRoutingPreset
+      parameters:
+        - name: preset
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [warp-china, warp-streaming, china-direct]
+      responses:
+        "200":
+          description: Preset rules imported
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportPresetEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/routing/{id}:
+    get:
+      tags: [Routing]
+      summary: Get routing rule by ID
+      operationId: getRoutingRule
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Routing rule details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingRuleEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Routing]
+      summary: Update a routing rule
+      operationId: updateRoutingRule
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertRoutingRuleRequest"
+      responses:
+        "200":
+          description: Routing rule updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingRuleEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Routing]
+      summary: Delete a routing rule
+      operationId: deleteRoutingRule
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Routing rule deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/routing/{id}/toggle:
+    post:
+      tags: [Routing]
+      summary: Toggle routing rule enabled status
+      operationId: toggleRoutingRule
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Routing rule toggled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingRuleEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/domains:
+    get:
+      tags: [Domains]
+      summary: List domains with certificate expiry status
+      operationId: listDomains
+      responses:
+        "200":
+          description: Domain list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainListEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Domains]
+      summary: Create a domain (validates domain format, certificate paths, and wildcard SANs)
+      operationId: createDomain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertDomainRequest"
+      responses:
+        "201":
+          description: Domain created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/domains/scan-certs:
+    get:
+      tags: [Domains]
+      summary: Scan configured certificate directory (acme.sh / Let's Encrypt)
+      operationId: scanCertificates
+      responses:
+        "200":
+          description: Discovered certificates
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanCertificatesEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/domains/scan-import:
+    post:
+      tags: [Domains]
+      summary: Scan certificate directory and upsert discovered domains
+      operationId: scanAndImportCertificates
+      responses:
+        "200":
+          description: Import summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanImportCertificatesEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/domains/import-cert:
+    post:
+      tags: [Domains]
+      summary: Import a single discovered certificate as a domain
+      operationId: importSingleCertificate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportCertRequest"
+      responses:
+        "200":
+          description: Imported or updated domain
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/domains/{id}:
+    get:
+      tags: [Domains]
+      summary: Get domain by ID
+      operationId: getDomain
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Domain details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Domains]
+      summary: Update a domain (empty private_key preserves existing value)
+      operationId: updateDomain
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertDomainRequest"
+      responses:
+        "200":
+          description: Domain updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [Domains]
+      summary: Delete a domain
+      operationId: deleteDomain
+      parameters:
+        - $ref: "#/components/parameters/IDParam"
+      responses:
+        "200":
+          description: Domain deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/wireguard/status:
+    get:
+      tags: [WireGuard]
+      summary: Get Linux kernel WireGuard service and interface status
+      operationId: getWireGuardStatus
+      responses:
+        "200":
+          description: WireGuard service status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGServiceStatusEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/wireguard/setup-env:
+    post:
+      tags: [WireGuard]
+      summary: Install wireguard-tools and enable kernel IPv4/IPv6 forwarding
+      operationId: setupWireGuardEnv
+      responses:
+        "200":
+          description: Environment setup result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGSetupEnvEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/SystemCommandFailed"
+
+  /api/v1/wireguard/service/{action}:
+    post:
+      tags: [WireGuard]
+      summary: Control wg-quick systemd unit
+      operationId: wireGuardServiceAction
+      parameters:
+        - name: action
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [start, stop, restart, enable, disable]
+      responses:
+        "200":
+          description: Action executed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGServiceActionEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/SystemCommandFailed"
+
+  /api/v1/wireguard/server:
+    get:
+      tags: [WireGuard]
+      summary: Get WireGuard server interface configuration
+      operationId: getWireGuardServer
+      responses:
+        "200":
+          description: WireGuard server configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGServerConfigEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    put:
+      tags: [WireGuard]
+      summary: Update WireGuard server configuration and sync wg0.conf
+      operationId: updateWireGuardServer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWGServerRequest"
+      responses:
+        "200":
+          description: WireGuard server updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGServerConfigEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/wireguard/peers:
+    get:
+      tags: [WireGuard]
+      summary: List WireGuard peers with live runtime handshake/transfer stats
+      operationId: listWireGuardPeers
+      responses:
+        "200":
+          description: WireGuard peer list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGPeerListEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [WireGuard]
+      summary: Create a WireGuard peer and hot-sync wg0.conf
+      operationId: createWireGuardPeer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertWGPeerRequest"
+      responses:
+        "201":
+          description: WireGuard peer created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGPeerEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/wireguard/peers/{id}:
+    get:
+      tags: [WireGuard]
+      summary: Get WireGuard peer by ID
+      operationId: getWireGuardPeer
+      parameters:
+        - $ref: "#/components/parameters/UintIDParam"
+      responses:
+        "200":
+          description: WireGuard peer details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGPeerEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [WireGuard]
+      summary: Update a WireGuard peer and hot-sync wg0.conf
+      operationId: updateWireGuardPeer
+      parameters:
+        - $ref: "#/components/parameters/UintIDParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertWGPeerRequest"
+      responses:
+        "200":
+          description: WireGuard peer updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGPeerEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [WireGuard]
+      summary: Delete a WireGuard peer and hot-sync wg0.conf
+      operationId: deleteWireGuardPeer
+      parameters:
+        - $ref: "#/components/parameters/UintIDParam"
+      responses:
+        "200":
+          description: WireGuard peer deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/wireguard/peers/{id}/toggle:
+    post:
+      tags: [WireGuard]
+      summary: Toggle WireGuard peer enabled status and hot-sync wg0.conf
+      operationId: toggleWireGuardPeer
+      parameters:
+        - $ref: "#/components/parameters/UintIDParam"
+      responses:
+        "200":
+          description: WireGuard peer toggled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGPeerEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/wireguard/peers/{id}/config:
+    get:
+      tags: [WireGuard]
+      summary: Export wg0.conf and Xray outbound JSON for a peer (uses server_public_host)
+      operationId: getWireGuardPeerConfig
+      parameters:
+        - $ref: "#/components/parameters/UintIDParam"
+      responses:
+        "200":
+          description: Client export configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGPeerExportConfigEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/wireguard/generate-keys:
+    post:
+      tags: [WireGuard]
+      summary: Generate a Curve25519 key pair
+      operationId: generateWGKeys
+      responses:
+        "200":
+          description: Generated key pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WGKeyPairEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/xray/status:
+    get:
+      tags: [Xray & System]
+      summary: Get Xray systemd service status
+      operationId: getXrayStatus
+      responses:
+        "200":
+          description: Xray service status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XrayStatusEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/xray/restart:
+    post:
+      tags: [Xray & System]
+      summary: Restart Xray service
+      operationId: restartXray
+      responses:
+        "200":
+          description: Xray restarted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XrayRestartEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/SystemCommandFailed"
+
+  /api/v1/xray/config:
+    get:
+      tags: [Xray & System]
+      summary: Generate and preview Xray JSON configuration (Server-mode only)
+      operationId: getXrayConfig
+      responses:
+        "200":
+          description: Generated Xray configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XrayConfigEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/xray/apply:
+    post:
+      tags: [Xray & System]
+      summary: Generate, validate (`xray -test`), write Xray/Nginx configs, and restart/reload services
+      operationId: applyXrayConfig
+      parameters:
+        - name: hot
+          in: query
+          description: Request hot reload mode if supported
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Configuration applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XrayApplyEnvelope"
+        "400":
+          $ref: "#/components/responses/XrayValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/SystemCommandFailed"
+
+  /api/v1/settings:
+    get:
+      tags: [Xray & System]
+      summary: Get single-Server mode application settings
+      operationId: getSettings
+      responses:
+        "200":
+          description: System settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettingsEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    put:
+      tags: [Xray & System]
+      summary: Update single-Server mode application settings (partial updates supported; sub_path updates take effect immediately)
+      operationId: updateSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateSettingsRequest"
+      responses:
+        "200":
+          description: Updated system settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettingsEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/panel/restart:
+    post:
+      tags: [Xray & System]
+      summary: Trigger asynchronous restart of xray-panel-server service
+      operationId: restartPanel
+      responses:
+        "200":
+          description: Restart scheduled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PanelRestartEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/logs:
+    get:
+      tags: [Xray & System]
+      summary: Fetch recent service logs (journalctl or log files)
+      operationId: getLogs
+      parameters:
+        - $ref: "#/components/parameters/LogServiceParam"
+        - $ref: "#/components/parameters/LogLinesParam"
+      responses:
+        "200":
+          description: Service log content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogsEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/logs/stream:
+    get:
+      tags: [Xray & System]
+      summary: Stream service logs via Server-Sent Events (SSE)
+      operationId: streamLogs
+      parameters:
+        - $ref: "#/components/parameters/LogServiceParam"
+        - $ref: "#/components/parameters/LogLinesParam"
+      responses:
+        "200":
+          description: SSE stream of log events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /{sub_path}/{path}:
+    get:
+      tags: [Subscriptions]
+      summary: Public aggregated subscription endpoint (base64 default)
+      description: |
+        Dynamically matched against the `sub_path` setting (default `/d`).
+        Exempt from Bearer token authentication and rate-limited per IP (30 req/min).
+      operationId: getSubscriptionDefault
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/SubPathPrefixParam"
+        - $ref: "#/components/parameters/UserSubPathParam"
+      responses:
+        "200":
+          description: Base64-encoded subscription links
+          headers:
+            Subscription-Userinfo:
+              schema:
+                type: string
+            Profile-Update-Interval:
+              schema:
+                type: string
+            Profile-Title:
+              schema:
+                type: string
+          content:
+            text/plain:
+              schema:
+                type: string
+        "403":
+          description: User subscription disabled, expired, or traffic exhausted
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: Subscription path not found
+          content:
+            text/plain:
+              schema:
+                type: string
+        "429":
+          description: Subscription rate limit exceeded
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /{sub_path}/{path}/{format}:
+    get:
+      tags: [Subscriptions]
+      summary: Public aggregated subscription endpoint with explicit output format
+      operationId: getSubscriptionFormatted
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/SubPathPrefixParam"
+        - $ref: "#/components/parameters/UserSubPathParam"
+        - name: format
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [base64, plain, txt, t, json, j, yaml, y, clash]
+      responses:
+        "200":
+          description: Subscription payload in requested format
+          content:
+            text/plain:
+              schema:
+                type: string
+            text/yaml:
+              schema:
+                type: string
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionJSONEnvelope"
+        "400":
+          description: Unknown subscription format
+          content:
+            text/plain:
+              schema:
+                type: string
+        "403":
+          description: User subscription disabled, expired, or traffic exhausted
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: Subscription path not found
+          content:
+            text/plain:
+              schema:
+                type: string
+        "429":
+          description: Subscription rate limit exceeded
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: "Static API Token (xrp_<48 chars>)"
+      description: "Static Bearer token passed exclusively via `Authorization: Bearer <token>` header."
+
+  parameters:
+    IDParam:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    UintIDParam:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: uint64
+    SubPathPrefixParam:
+      name: sub_path
+      in: path
+      required: true
+      description: Configured subscription prefix without leading slash (default `d` for `/d`)
+      schema:
+        type: string
+    UserSubPathParam:
+      name: path
+      in: path
+      required: true
+      description: Unique per-user subscription path token
+      schema:
+        type: string
+    LogServiceParam:
+      name: service
+      in: query
+      schema:
+        type: string
+        enum: [xray, panel, wireguard, nginx]
+        default: xray
+    LogLinesParam:
+      name: lines
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 100
+
+  responses:
+    ValidationError:
+      description: Validation or request binding error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            error:
+              code: VALIDATION_ERROR
+              message: Invalid request payload
+    Unauthorized:
+      description: Missing, invalid, expired, or revoked Bearer API token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            error:
+              code: UNAUTHORIZED
+              message: Invalid or revoked API token
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            error:
+              code: NOT_FOUND
+              message: Resource not found
+    Conflict:
+      description: Resource conflict or duplicate unique field
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            error:
+              code: CONFLICT
+              message: Resource already exists or port conflicts
+    RateLimited:
+      description: Authentication rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            error:
+              code: RATE_LIMITED
+              message: Too many failed authentication attempts, please retry later
+    XrayValidationFailed:
+      description: Generated Xray config failed `xray -test` validation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            error:
+              code: XRAY_VALIDATION_FAILED
+              message: Xray config validation failed, service was not restarted
+    SystemCommandFailed:
+      description: Underlying OS or systemd command failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            error:
+              code: SYSTEM_COMMAND_FAILED
+              message: System command failed
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            error:
+              code: INTERNAL_ERROR
+              message: Internal server error
+
+  schemas:
+    # ===== Core Error & Envelope Types =====
+    ErrorCode:
+      type: string
+      enum:
+        - UNAUTHORIZED
+        - RATE_LIMITED
+        - VALIDATION_ERROR
+        - NOT_FOUND
+        - CONFLICT
+        - FORBIDDEN
+        - XRAY_VALIDATION_FAILED
+        - SYSTEM_COMMAND_FAILED
+        - INTERNAL_ERROR
+
+    ErrorDetail:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+    ErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        error:
+          $ref: "#/components/schemas/ErrorDetail"
+
+    DeleteResponse:
+      type: object
+      required: [id, deleted]
+      properties:
+        id:
+          type: string
+        deleted:
+          type: boolean
+
+    DeleteEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/DeleteResponse"
+
+    # ===== Health & Auth & Tokens =====
+    HealthResponse:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+          example: 1.0.0
+
+    AuthVerifyResponse:
+      type: object
+      required:
+        - valid
+        - token_id
+        - token_name
+        - token_prefix
+        - version
+        - server_public_host
+        - sub_domain
+        - sub_path
+        - panel_title
+      properties:
+        valid:
+          type: boolean
+        token_id:
+          type: string
+        token_name:
+          type: string
+        token_prefix:
+          type: string
+        version:
+          type: string
+        server_public_host:
+          type: string
+        sub_domain:
+          type: string
+        sub_path:
+          type: string
+        panel_title:
+          type: string
+
+    AuthVerifyEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/AuthVerifyResponse"
+
+    APITokenDTO:
+      type: object
+      required: [id, name, token_prefix, revoked, last_ip, created_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        token_prefix:
+          type: string
+          example: xrp_9a3f...
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked:
+          type: boolean
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_ip:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    TokenListResponse:
+      type: object
+      required: [tokens, total]
+      properties:
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/APITokenDTO"
+        total:
+          type: integer
+
+    TokenListEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/TokenListResponse"
+
+    CreateTokenRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          example: macbook
+        expires_days:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: Token TTL in days (0 or null means permanent)
+
+    CreateTokenResponse:
+      type: object
+      required: [token, plaintext_token]
+      properties:
+        token:
+          $ref: "#/components/schemas/APITokenDTO"
+        plaintext_token:
+          type: string
+          description: Returned only once at creation time (`xrp_...`)
+
+    CreateTokenEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/CreateTokenResponse"
+
+    TokenDeleteResponse:
+      type: object
+      required: [id, revoked, deleted]
+      properties:
+        id:
+          type: string
+        revoked:
+          type: boolean
+        deleted:
+          type: boolean
+
+    TokenDeleteEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/TokenDeleteResponse"
+
+    # ===== Dashboard =====
+    DashboardCounts:
+      type: object
+      required: [total, active]
+      properties:
+        total:
+          type: integer
+          format: int64
+        active:
+          type: integer
+          format: int64
+
+    DashboardTraffic:
+      type: object
+      required:
+        - users_traffic_used_bytes
+        - monthly_net_sent_bytes
+        - monthly_net_recv_bytes
+        - monthly_net_total_bytes
+        - baseline_month
+      properties:
+        users_traffic_used_bytes:
+          type: integer
+          format: int64
+        monthly_net_sent_bytes:
+          type: integer
+          format: uint64
+        monthly_net_recv_bytes:
+          type: integer
+          format: uint64
+        monthly_net_total_bytes:
+          type: integer
+          format: uint64
+        baseline_month:
+          type: string
+
+    DashboardSystemMetrics:
+      type: object
+      required:
+        - hostname
+        - os
+        - platform
+        - uptime_seconds
+        - go_version
+        - cpu_model
+        - cpu_cores
+        - cpu_usage_percent
+        - mem_total_bytes
+        - mem_used_bytes
+        - mem_free_bytes
+        - mem_percent
+        - disk_total_bytes
+        - disk_used_bytes
+        - disk_free_bytes
+        - disk_percent
+      properties:
+        hostname:
+          type: string
+        os:
+          type: string
+        platform:
+          type: string
+        uptime_seconds:
+          type: integer
+          format: uint64
+        go_version:
+          type: string
+        cpu_model:
+          type: string
+        cpu_cores:
+          type: integer
+        cpu_usage_percent:
+          type: number
+          format: double
+        mem_total_bytes:
+          type: integer
+          format: uint64
+        mem_used_bytes:
+          type: integer
+          format: uint64
+        mem_free_bytes:
+          type: integer
+          format: uint64
+        mem_percent:
+          type: number
+          format: double
+        disk_total_bytes:
+          type: integer
+          format: uint64
+        disk_used_bytes:
+          type: integer
+          format: uint64
+        disk_free_bytes:
+          type: integer
+          format: uint64
+        disk_percent:
+          type: number
+          format: double
+
+    DashboardServices:
+      type: object
+      required:
+        - xray_active
+        - xray_status
+        - wireguard_installed
+        - wireguard_active
+        - wireguard_interface
+        - wireguard_online_peers
+        - wireguard_total_peers
+      properties:
+        xray_active:
+          type: boolean
+        xray_status:
+          type: string
+        wireguard_installed:
+          type: boolean
+        wireguard_active:
+          type: boolean
+        wireguard_interface:
+          type: string
+        wireguard_online_peers:
+          type: integer
+        wireguard_total_peers:
+          type: integer
+
+    DashboardResponse:
+      type: object
+      required:
+        - users
+        - inbounds
+        - outbounds
+        - domains
+        - routing_rules
+        - traffic
+        - system
+        - services
+      properties:
+        users:
+          $ref: "#/components/schemas/DashboardCounts"
+        inbounds:
+          $ref: "#/components/schemas/DashboardCounts"
+        outbounds:
+          $ref: "#/components/schemas/DashboardCounts"
+        domains:
+          $ref: "#/components/schemas/DashboardCounts"
+        routing_rules:
+          $ref: "#/components/schemas/DashboardCounts"
+        traffic:
+          $ref: "#/components/schemas/DashboardTraffic"
+        system:
+          $ref: "#/components/schemas/DashboardSystemMetrics"
+        services:
+          $ref: "#/components/schemas/DashboardServices"
+
+    DashboardEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/DashboardResponse"
+
+    # ===== Users =====
+    UserSubURLs:
+      type: object
+      required: [base64, plain, json, yaml, relative_path]
+      properties:
+        base64:
+          type: string
+        plain:
+          type: string
+        json:
+          type: string
+        yaml:
+          type: string
+        relative_path:
+          type: string
+
+    UserDTO:
+      type: object
+      required:
+        - id
+        - uuid
+        - name
+        - email
+        - traffic_limit_bytes
+        - traffic_used_bytes
+        - remaining_traffic_bytes
+        - remaining_days
+        - enabled
+        - is_active
+        - sub_path
+        - sub_urls
+        - note
+        - wg_pub_key
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        uuid:
+          type: string
+          format: uuid
+        name:
+          type: string
+        email:
+          type: string
+        traffic_limit_bytes:
+          type: integer
+          format: int64
+          description: 0 means unlimited
+        traffic_used_bytes:
+          type: integer
+          format: int64
+        remaining_traffic_bytes:
+          type: integer
+          format: int64
+          description: -1 means unlimited
+        traffic_reset_at:
+          type: string
+          format: date-time
+          nullable: true
+        expiry_date:
+          type: string
+          format: date-time
+          nullable: true
+        remaining_days:
+          type: integer
+          description: -1 means never expires
+        enabled:
+          type: boolean
+        is_active:
+          type: boolean
+        sub_path:
+          type: string
+        sub_urls:
+          $ref: "#/components/schemas/UserSubURLs"
+        note:
+          type: string
+        wg_pub_key:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    UserListResponse:
+      type: object
+      required: [users, total]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserDTO"
+        total:
+          type: integer
+
+    UserEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/UserDTO"
+
+    UserListEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/UserListResponse"
+
+    CreateUserRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        email:
+          type: string
+        uuid:
+          type: string
+        traffic_limit_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        expiry_date:
+          type: string
+          format: date-time
+          nullable: true
+        expire_days:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: Fallback relative expiry days if expiry_date is not specified
+        enabled:
+          type: boolean
+          default: true
+        note:
+          type: string
+        wg_pub_key:
+          type: string
+
+    UpdateUserRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        email:
+          type: string
+        uuid:
+          type: string
+        traffic_limit_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        expiry_date:
+          type: string
+          format: date-time
+          nullable: true
+        enabled:
+          type: boolean
+        note:
+          type: string
+        wg_pub_key:
+          type: string
+
+    # ===== Inbounds =====
+    InboundProtocol:
+      type: string
+      enum: [vless, trojan, wireguard]
+
+    InboundTransport:
+      type: string
+      enum: [xhttp, grpc, ws, raw]
+
+    DomainSummaryDTO:
+      type: object
+      required: [id, domain, type, is_wildcard, enabled]
+      properties:
+        id:
+          type: string
+        domain:
+          type: string
+        type:
+          $ref: "#/components/schemas/DomainType"
+        is_wildcard:
+          type: boolean
+        enabled:
+          type: boolean
+
+    InboundDTO:
+      type: object
+      required:
+        - id
+        - tag
+        - protocol
+        - transport
+        - port
+        - listen
+        - domain_id
+        - path
+        - service_name
+        - host
+        - mode
+        - actual_domain
+        - custom_sni
+        - connect_domain
+        - has_wg_secret_key
+        - wg_public_key
+        - wg_peer_pub_key
+        - wg_mtu
+        - wg_local_ip
+        - exclude_from_sub
+        - enabled
+        - use_uds
+        - socket_path
+        - remark
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        tag:
+          type: string
+        protocol:
+          $ref: "#/components/schemas/InboundProtocol"
+        transport:
+          $ref: "#/components/schemas/InboundTransport"
+        port:
+          type: integer
+        listen:
+          type: string
+        domain_id:
+          type: string
+        domain:
+          allOf:
+            - $ref: "#/components/schemas/DomainSummaryDTO"
+          nullable: true
+        path:
+          type: string
+        service_name:
+          type: string
+        host:
+          type: string
+        mode:
+          type: string
+        actual_domain:
+          type: string
+        custom_sni:
+          type: string
+        connect_domain:
+          type: string
+        has_wg_secret_key:
+          type: boolean
+        wg_public_key:
+          type: string
+        wg_peer_pub_key:
+          type: string
+        wg_mtu:
+          type: integer
+        wg_local_ip:
+          type: string
+        exclude_from_sub:
+          type: boolean
+        enabled:
+          type: boolean
+        use_uds:
+          type: boolean
+        socket_path:
+          type: string
+        remark:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    InboundListResponse:
+      type: object
+      required: [inbounds, total]
+      properties:
+        inbounds:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboundDTO"
+        total:
+          type: integer
+
+    InboundEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/InboundDTO"
+
+    InboundListEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/InboundListResponse"
+
+    UpsertInboundRequest:
+      type: object
+      properties:
+        tag:
+          type: string
+        protocol:
+          $ref: "#/components/schemas/InboundProtocol"
+        transport:
+          $ref: "#/components/schemas/InboundTransport"
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        listen:
+          type: string
+        domain_id:
+          type: string
+        path:
+          type: string
+        service_name:
+          type: string
+        host:
+          type: string
+        mode:
+          type: string
+        custom_sni:
+          type: string
+        connect_domain:
+          type: string
+        wg_secret_key:
+          type: string
+        wg_public_key:
+          type: string
+        wg_peer_pub_key:
+          type: string
+        wg_mtu:
+          type: integer
+        wg_local_ip:
+          type: string
+        exclude_from_sub:
+          type: boolean
+        use_uds:
+          type: boolean
+          nullable: true
+        enabled:
+          type: boolean
+          nullable: true
+        random_port:
+          type: boolean
+        random_path:
+          type: boolean
+        remark:
+          type: string
+
+    InboundWGClientConfigResponse:
+      type: object
+      required:
+        - inbound_id
+        - inbound_tag
+        - server_public_key
+        - server_host
+        - port
+        - endpoint
+        - peer_ip
+        - mtu
+        - wg_conf
+      properties:
+        inbound_id:
+          type: string
+        inbound_tag:
+          type: string
+        server_public_key:
+          type: string
+        server_host:
+          type: string
+        port:
+          type: integer
+        endpoint:
+          type: string
+        peer_ip:
+          type: string
+        mtu:
+          type: integer
+        wg_conf:
+          type: string
+
+    InboundWGClientConfigEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/InboundWGClientConfigResponse"
+
+    # ===== Outbounds =====
+    OutboundType:
+      type: string
+      enum: [direct, socks5, wireguard, trojan, blackhole, vless, vmess]
+
+    OutboundDTO:
+      type: object
+      required:
+        - id
+        - tag
+        - type
+        - server
+        - port
+        - username
+        - has_password
+        - has_wg_secret_key
+        - wg_client_pub_key
+        - wg_public_key
+        - wg_reserved
+        - wg_local_ipv4
+        - wg_local_ipv6
+        - wg_mtu
+        - wg_dns
+        - has_trojan_password
+        - trojan_sni
+        - trojan_network
+        - uuid
+        - flow
+        - security
+        - network
+        - header_type
+        - request_host
+        - path
+        - service_name
+        - tls
+        - tls_server_name
+        - tls_alpn
+        - reality
+        - reality_pubkey
+        - reality_short_id
+        - reality_sni
+        - enabled
+        - priority
+        - remark
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        tag:
+          type: string
+        type:
+          $ref: "#/components/schemas/OutboundType"
+        server:
+          type: string
+        port:
+          type: integer
+        username:
+          type: string
+        has_password:
+          type: boolean
+        has_wg_secret_key:
+          type: boolean
+        wg_client_pub_key:
+          type: string
+        wg_public_key:
+          type: string
+        wg_reserved:
+          type: string
+        wg_local_ipv4:
+          type: string
+        wg_local_ipv6:
+          type: string
+        wg_mtu:
+          type: integer
+        wg_dns:
+          type: string
+        has_trojan_password:
+          type: boolean
+        trojan_sni:
+          type: string
+        trojan_network:
+          type: string
+        uuid:
+          type: string
+        flow:
+          type: string
+        security:
+          type: string
+        network:
+          type: string
+        header_type:
+          type: string
+        request_host:
+          type: string
+        path:
+          type: string
+        service_name:
+          type: string
+        tls:
+          type: boolean
+        tls_server_name:
+          type: string
+        tls_alpn:
+          type: string
+        reality:
+          type: boolean
+        reality_pubkey:
+          type: string
+        reality_short_id:
+          type: string
+        reality_sni:
+          type: string
+        enabled:
+          type: boolean
+        priority:
+          type: integer
+        remark:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    OutboundListResponse:
+      type: object
+      required: [outbounds, total]
+      properties:
+        outbounds:
+          type: array
+          items:
+            $ref: "#/components/schemas/OutboundDTO"
+        total:
+          type: integer
+
+    OutboundEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/OutboundDTO"
+
+    OutboundListEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/OutboundListResponse"
+
+    UpsertOutboundRequest:
+      type: object
+      required: [type]
+      properties:
+        tag:
+          type: string
+        type:
+          $ref: "#/components/schemas/OutboundType"
+        server:
+          type: string
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        username:
+          type: string
+        password:
+          type: string
+        wg_secret_key:
+          type: string
+        wg_client_pub_key:
+          type: string
+        wg_public_key:
+          type: string
+        wg_reserved:
+          type: string
+        wg_local_ipv4:
+          type: string
+        wg_local_ipv6:
+          type: string
+        wg_mtu:
+          type: integer
+        wg_dns:
+          type: string
+        trojan_password:
+          type: string
+        trojan_sni:
+          type: string
+        trojan_network:
+          type: string
+        uuid:
+          type: string
+        flow:
+          type: string
+        security:
+          type: string
+        network:
+          type: string
+        header_type:
+          type: string
+        request_host:
+          type: string
+        path:
+          type: string
+        service_name:
+          type: string
+        tls:
+          type: boolean
+        tls_server_name:
+          type: string
+        tls_alpn:
+          type: string
+        reality:
+          type: boolean
+        reality_pubkey:
+          type: string
+        reality_short_id:
+          type: string
+        reality_sni:
+          type: string
+        enabled:
+          type: boolean
+          nullable: true
+        priority:
+          type: integer
+        remark:
+          type: string
+
+    ImportShareLinkRequest:
+      type: object
+      required: [link]
+      properties:
+        link:
+          type: string
+          minLength: 1
+          description: vless://, vmess://, or trojan:// share link
+
+    ParseWireGuardConfigRequest:
+      type: object
+      required: [config]
+      properties:
+        config:
+          type: string
+          minLength: 1
+
+    ParsedWireGuardConfig:
+      type: object
+      required:
+        - private_key
+        - client_public_key
+        - public_key
+        - endpoint
+        - server
+        - port
+        - address
+        - local_ipv4
+        - local_ipv6
+        - dns
+        - mtu
+      properties:
+        private_key:
+          type: string
+        client_public_key:
+          type: string
+        public_key:
+          type: string
+        endpoint:
+          type: string
+        server:
+          type: string
+        port:
+          type: integer
+        address:
+          type: string
+        local_ipv4:
+          type: string
+        local_ipv6:
+          type: string
+        dns:
+          type: string
+        mtu:
+          type: integer
+
+    ParsedWireGuardConfigEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/ParsedWireGuardConfig"
+
+    OutboundTestResult:
+      type: object
+      required: [success, message]
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        latency_ms:
+          type: integer
+          format: int64
+        endpoint:
+          type: string
+        outbound_ip:
+          type: string
+        location:
+          type: string
+
+    OutboundTestEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/OutboundTestResult"
+
+    WGKeyPair:
+      type: object
+      required: [private_key, public_key]
+      properties:
+        private_key:
+          type: string
+        public_key:
+          type: string
+
+    WGKeyPairEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/WGKeyPair"
+
+    # ===== Routing =====
+    RuleType:
+      type: string
+      enum: [inbound, domain, ip, geosite, geoip, protocol]
+
+    RoutingRuleDTO:
+      type: object
+      required:
+        - id
+        - name
+        - type
+        - inbound_tag
+        - domains
+        - ips
+        - geosite_tags
+        - geoip_codes
+        - protocols
+        - outbound_tag
+        - priority
+        - enabled
+        - remark
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          $ref: "#/components/schemas/RuleType"
+        inbound_tag:
+          type: string
+        domains:
+          type: string
+        ips:
+          type: string
+        geosite_tags:
+          type: string
+        geoip_codes:
+          type: string
+        protocols:
+          type: string
+        outbound_tag:
+          type: string
+        priority:
+          type: integer
+        enabled:
+          type: boolean
+        remark:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    RoutingRuleListResponse:
+      type: object
+      required: [rules, total]
+      properties:
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutingRuleDTO"
+        total:
+          type: integer
+
+    RoutingRuleEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/RoutingRuleDTO"
+
+    RoutingRuleListEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/RoutingRuleListResponse"
+
+    UpsertRoutingRuleRequest:
+      type: object
+      required: [name, type, outbound_tag]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        type:
+          $ref: "#/components/schemas/RuleType"
+        inbound_tag:
+          type: string
+        domains:
+          type: string
+        ips:
+          type: string
+        geosite_tags:
+          type: string
+        geoip_codes:
+          type: string
+        protocols:
+          type: string
+        outbound_tag:
+          type: string
+          minLength: 1
+        priority:
+          type: integer
+          default: 100
+        enabled:
+          type: boolean
+          nullable: true
+        remark:
+          type: string
+
+    ImportPresetResponse:
+      type: object
+      required: [preset, imported_count, skipped_count, rules]
+      properties:
+        preset:
+          type: string
+        imported_count:
+          type: integer
+        skipped_count:
+          type: integer
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutingRuleDTO"
+
+    ImportPresetEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/ImportPresetResponse"
+
+    GeoDataInfo:
+      type: object
+      required: [geosite_available, geoip_available, geosite_tags, geoip_codes]
+      properties:
+        geosite_available:
+          type: boolean
+        geoip_available:
+          type: boolean
+        geosite_tags:
+          type: array
+          items:
+            type: string
+        geoip_codes:
+          type: array
+          items:
+            type: string
+
+    GeoDataEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/GeoDataInfo"
+
+    # ===== Domains & Certificates =====
+    DomainType:
+      type: string
+      enum: [direct, cdn, reality]
+
+    DomainDTO:
+      type: object
+      required:
+        - id
+        - domain
+        - type
+        - is_wildcard
+        - server_name
+        - fingerprint
+        - short_id
+        - has_private_key
+        - public_key
+        - cert_path
+        - key_path
+        - enabled
+        - has_cert
+        - cert_issuer
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        domain:
+          type: string
+        type:
+          $ref: "#/components/schemas/DomainType"
+        is_wildcard:
+          type: boolean
+        server_name:
+          type: string
+        fingerprint:
+          type: string
+        short_id:
+          type: string
+        has_private_key:
+          type: boolean
+        public_key:
+          type: string
+        cert_path:
+          type: string
+        key_path:
+          type: string
+        enabled:
+          type: boolean
+        has_cert:
+          type: boolean
+        cert_expiry_date:
+          type: string
+          format: date-time
+          nullable: true
+        days_to_expiry:
+          type: integer
+          nullable: true
+        cert_issuer:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DomainListResponse:
+      type: object
+      required: [domains, total]
+      properties:
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/DomainDTO"
+        total:
+          type: integer
+
+    DomainEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/DomainDTO"
+
+    DomainListEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/DomainListResponse"
+
+    UpsertDomainRequest:
+      type: object
+      required: [domain]
+      properties:
+        domain:
+          type: string
+          minLength: 1
+        type:
+          $ref: "#/components/schemas/DomainType"
+          default: direct
+        is_wildcard:
+          type: boolean
+        server_name:
+          type: string
+        fingerprint:
+          type: string
+        short_id:
+          type: string
+        private_key:
+          type: string
+        public_key:
+          type: string
+        cert_path:
+          type: string
+        key_path:
+          type: string
+        enabled:
+          type: boolean
+          nullable: true
+
+    CertificateInfo:
+      type: object
+      required:
+        - domain
+        - domains
+        - cert_path
+        - key_path
+        - expiry_date
+        - days_to_expiry
+        - status
+        - issuer
+        - is_wildcard
+        - exists
+      properties:
+        domain:
+          type: string
+        domains:
+          type: array
+          items:
+            type: string
+        cert_path:
+          type: string
+        key_path:
+          type: string
+        expiry_date:
+          type: string
+          format: date-time
+        days_to_expiry:
+          type: integer
+        status:
+          type: string
+          enum: [valid, expiring_soon, expired, unknown]
+        issuer:
+          type: string
+        is_wildcard:
+          type: boolean
+        exists:
+          type: boolean
+
+    ScanCertificatesResponse:
+      type: object
+      required: [cert_dir, certificates, count]
+      properties:
+        cert_dir:
+          type: string
+        certificates:
+          type: array
+          items:
+            $ref: "#/components/schemas/CertificateInfo"
+        count:
+          type: integer
+
+    ScanCertificatesEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/ScanCertificatesResponse"
+
+    ScanImportCertificatesResponse:
+      type: object
+      required: [cert_dir, imported_count, updated_count, skipped_count, errors, domains]
+      properties:
+        cert_dir:
+          type: string
+        imported_count:
+          type: integer
+        updated_count:
+          type: integer
+        skipped_count:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: string
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/DomainDTO"
+
+    ScanImportCertificatesEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/ScanImportCertificatesResponse"
+
+    ImportCertRequest:
+      type: object
+      required: [domain, cert_path, key_path]
+      properties:
+        domain:
+          type: string
+        cert_path:
+          type: string
+        key_path:
+          type: string
+
+    # ===== WireGuard =====
+    WGServiceStatus:
+      type: object
+      required:
+        - is_linux
+        - is_installed
+        - is_active
+        - is_enabled
+        - interface_name
+        - listen_port
+        - public_key
+        - address
+        - total_peers
+        - active_peers
+        - online_peers
+        - port_conflict
+        - conflict_inbound
+        - ipv4_forwarding
+        - ipv6_forwarding
+        - enable_nat
+      properties:
+        is_linux:
+          type: boolean
+        is_installed:
+          type: boolean
+        is_active:
+          type: boolean
+        is_enabled:
+          type: boolean
+        interface_name:
+          type: string
+        listen_port:
+          type: integer
+        public_key:
+          type: string
+        address:
+          type: string
+        total_peers:
+          type: integer
+        active_peers:
+          type: integer
+        online_peers:
+          type: integer
+        port_conflict:
+          type: boolean
+        conflict_inbound:
+          type: string
+        ipv4_forwarding:
+          type: boolean
+        ipv6_forwarding:
+          type: boolean
+        enable_nat:
+          type: boolean
+
+    WGServiceStatusEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/WGServiceStatus"
+
+    WGSetupEnvResponse:
+      type: object
+      required: [success, message]
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+
+    WGSetupEnvEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/WGSetupEnvResponse"
+
+    WGServiceActionResponse:
+      type: object
+      required: [action, success, status]
+      properties:
+        action:
+          type: string
+          enum: [start, stop, restart, enable, disable]
+        success:
+          type: boolean
+        status:
+          $ref: "#/components/schemas/WGServiceStatus"
+
+    WGServiceActionEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/WGServiceActionResponse"
+
+    WGServerConfigDTO:
+      type: object
+      required:
+        - id
+        - interface_name
+        - has_private_key
+        - public_key
+        - listen_port
+        - address
+        - mtu
+        - enable_nat
+        - post_up
+        - post_down
+        - enabled
+        - updated_at
+      properties:
+        id:
+          type: integer
+          format: uint64
+        interface_name:
+          type: string
+        has_private_key:
+          type: boolean
+        public_key:
+          type: string
+        listen_port:
+          type: integer
+        address:
+          type: string
+        mtu:
+          type: integer
+        enable_nat:
+          type: boolean
+        post_up:
+          type: string
+        post_down:
+          type: string
+        enabled:
+          type: boolean
+        updated_at:
+          type: string
+          format: date-time
+
+    WGServerConfigEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/WGServerConfigDTO"
+
+    UpdateWGServerRequest:
+      type: object
+      properties:
+        interface_name:
+          type: string
+        listen_port:
+          type: integer
+          minimum: 1024
+          maximum: 65535
+        address:
+          type: string
+        mtu:
+          type: integer
+          minimum: 576
+          maximum: 1500
+        private_key:
+          type: string
+          description: Optional; empty preserves existing key
+        enable_nat:
+          type: boolean
+          nullable: true
+        post_up:
+          type: string
+        post_down:
+          type: string
+        enabled:
+          type: boolean
+          nullable: true
+
+    WGPeerRuntimeStats:
+      type: object
+      required:
+        - public_key
+        - endpoint
+        - allowed_ips
+        - handshake_ago
+        - transfer_rx
+        - transfer_tx
+        - transfer_rx_human
+        - transfer_tx_human
+        - is_online
+      properties:
+        public_key:
+          type: string
+        endpoint:
+          type: string
+        allowed_ips:
+          type: string
+        latest_handshake:
+          type: string
+          format: date-time
+          nullable: true
+        handshake_ago:
+          type: string
+        transfer_rx:
+          type: integer
+          format: int64
+        transfer_tx:
+          type: integer
+          format: int64
+        transfer_rx_human:
+          type: string
+        transfer_tx_human:
+          type: string
+        is_online:
+          type: boolean
+
+    WGPeerDTO:
+      type: object
+      required:
+        - id
+        - name
+        - public_key
+        - has_private_key
+        - has_preshared_key
+        - allowed_ips
+        - endpoint
+        - persistent_keepalive
+        - enabled
+        - runtime
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: integer
+          format: uint64
+        name:
+          type: string
+        public_key:
+          type: string
+        has_private_key:
+          type: boolean
+        has_preshared_key:
+          type: boolean
+        allowed_ips:
+          type: string
+        endpoint:
+          type: string
+        persistent_keepalive:
+          type: integer
+        enabled:
+          type: boolean
+        runtime:
+          $ref: "#/components/schemas/WGPeerRuntimeStats"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    WGPeerListResponse:
+      type: object
+      required: [peers, next_available_ip, total]
+      properties:
+        peers:
+          type: array
+          items:
+            $ref: "#/components/schemas/WGPeerDTO"
+        next_available_ip:
+          type: string
+        total:
+          type: integer
+
+    WGPeerEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/WGPeerDTO"
+
+    WGPeerListEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/WGPeerListResponse"
+
+    UpsertWGPeerRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        public_key:
+          type: string
+        private_key:
+          type: string
+        preshared_key:
+          type: string
+        allowed_ips:
+          type: string
+        endpoint:
+          type: string
+        persistent_keepalive:
+          type: integer
+          minimum: 0
+          maximum: 3600
+        enabled:
+          type: boolean
+          nullable: true
+
+    WGPeerExportConfigResponse:
+      type: object
+      required: [peer_id, peer_name, server_host, endpoint, wg_conf, xray_json, has_private_key]
+      properties:
+        peer_id:
+          type: integer
+          format: uint64
+        peer_name:
+          type: string
+        server_host:
+          type: string
+        endpoint:
+          type: string
+        wg_conf:
+          type: string
+        xray_json:
+          type: string
+        has_private_key:
+          type: boolean
+
+    WGPeerExportConfigEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/WGPeerExportConfigResponse"
+
+    # ===== Xray, Settings, Panel & Logs =====
+    XrayStatusResponse:
+      type: object
+      required: [status, active]
+      properties:
+        status:
+          type: string
+        active:
+          type: boolean
+
+    XrayStatusEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/XrayStatusResponse"
+
+    XrayRestartResponse:
+      type: object
+      required: [restarted, status, active]
+      properties:
+        restarted:
+          type: boolean
+        status:
+          type: string
+        active:
+          type: boolean
+
+    XrayRestartEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/XrayRestartResponse"
+
+    XrayConfigResponse:
+      type: object
+      required: [config, raw]
+      properties:
+        config:
+          type: object
+          additionalProperties: true
+        raw:
+          type: string
+
+    XrayConfigEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/XrayConfigResponse"
+
+    XrayApplyResponse:
+      type: object
+      required: [applied, method, config_len, message]
+      properties:
+        applied:
+          type: boolean
+        method:
+          type: string
+          enum: [restart, hot_reload]
+        config_len:
+          type: integer
+        message:
+          type: string
+
+    XrayApplyEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/XrayApplyResponse"
+
+    DirectDomainStrategy:
+      type: string
+      enum: [AsIs, UseIP, UseIPv4, UseIPv6]
+
+    XrayLogLevel:
+      type: string
+      enum: [debug, info, warning, error, none]
+
+    SettingsDTO:
+      type: object
+      required:
+        - panel_title
+        - sub_domain
+        - sub_path
+        - server_public_host
+        - xray_log_level
+        - enable_traffic_stats
+        - enable_sniffing
+        - default_traffic_limit
+        - default_expire_days
+        - direct_domain_strategy
+        - monthly_net_baseline_sent
+        - monthly_net_baseline_recv
+        - monthly_net_baseline_month
+      properties:
+        panel_title:
+          type: string
+        sub_domain:
+          type: string
+        sub_path:
+          type: string
+        server_public_host:
+          type: string
+        xray_log_level:
+          $ref: "#/components/schemas/XrayLogLevel"
+        enable_traffic_stats:
+          type: boolean
+        enable_sniffing:
+          type: boolean
+        default_traffic_limit:
+          type: integer
+          format: int64
+        default_expire_days:
+          type: integer
+        direct_domain_strategy:
+          $ref: "#/components/schemas/DirectDomainStrategy"
+        monthly_net_baseline_sent:
+          type: string
+        monthly_net_baseline_recv:
+          type: string
+        monthly_net_baseline_month:
+          type: string
+
+    SettingsEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/SettingsDTO"
+
+    UpdateSettingsRequest:
+      type: object
+      properties:
+        panel_title:
+          type: string
+          nullable: true
+        sub_domain:
+          type: string
+          nullable: true
+        sub_path:
+          type: string
+          nullable: true
+        server_public_host:
+          type: string
+          nullable: true
+        xray_log_level:
+          allOf:
+            - $ref: "#/components/schemas/XrayLogLevel"
+          nullable: true
+        enable_traffic_stats:
+          type: boolean
+          nullable: true
+        enable_sniffing:
+          type: boolean
+          nullable: true
+        default_traffic_limit:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+        default_expire_days:
+          type: integer
+          minimum: 0
+          nullable: true
+        direct_domain_strategy:
+          allOf:
+            - $ref: "#/components/schemas/DirectDomainStrategy"
+          nullable: true
+
+    PanelRestartResponse:
+      type: object
+      required: [restarting, message]
+      properties:
+        restarting:
+          type: boolean
+        message:
+          type: string
+
+    PanelRestartEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/PanelRestartResponse"
+
+    LogsResponse:
+      type: object
+      required: [service, lines, content]
+      properties:
+        service:
+          type: string
+          enum: [xray, panel, wireguard, nginx]
+        lines:
+          type: integer
+        content:
+          type: string
+
+    LogsEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/LogsResponse"
+
+    # ===== Subscriptions =====
+    SubscriptionUserSummary:
+      type: object
+      required:
+        - name
+        - email
+        - uuid
+        - upload
+        - download
+        - total
+        - expire
+        - traffic_used
+        - traffic_limit
+        - remaining_days
+        - remaining_traffic
+        - is_active
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+        uuid:
+          type: string
+        upload:
+          type: integer
+          format: int64
+        download:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int64
+        expire:
+          type: integer
+          format: int64
+        traffic_used:
+          type: integer
+          format: int64
+        traffic_limit:
+          type: integer
+          format: int64
+        remaining_days:
+          type: integer
+        remaining_traffic:
+          type: integer
+          format: int64
+        is_active:
+          type: boolean
+
+    SubscriptionJSONResponse:
+      type: object
+      required: [links, count, user]
+      properties:
+        links:
+          type: array
+          items:
+            type: string
+        count:
+          type: integer
+        user:
+          $ref: "#/components/schemas/SubscriptionUserSummary"
+
+    SubscriptionJSONEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/SubscriptionJSONResponse"
