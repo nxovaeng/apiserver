@@ -192,13 +192,18 @@ prepare_nginx() {
 }
 
 check_ssh_tunnel_prereqs() {
-    if ! command -v sshd &>/dev/null; then
+    local sshd_bin=""
+    if command -v sshd &>/dev/null; then
+        sshd_bin="$(command -v sshd)"
+    elif [[ -x /usr/sbin/sshd ]]; then
+        sshd_bin="/usr/sbin/sshd"
+    else
         warn "未检测到 OpenSSH 服务端 (sshd)，桌面端将无法通过 SSH 隧道接入"
         return
     fi
 
     local sshd_dump=""
-    sshd_dump="$(sshd -T 2>/dev/null || true)"
+    sshd_dump="$("${sshd_bin}" -T 2>/dev/null || true)"
     if [[ -n "${sshd_dump}" ]]; then
         local fwd
         fwd="$(echo "${sshd_dump}" | awk '$1=="allowtcpforwarding" {print $2; exit}')"
@@ -218,10 +223,13 @@ check_ssh_tunnel_prereqs() {
 }
 
 install_server_binary() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local repo_dir
-    repo_dir="$(cd "${script_dir}/.." && pwd)"
+    local script_src="${BASH_SOURCE[0]:-}"
+    local repo_dir="."
+    if [[ -n "${script_src}" && -f "${script_src}" ]]; then
+        local script_dir
+        script_dir="$(cd "$(dirname "${script_src}")" && pwd)"
+        repo_dir="$(cd "${script_dir}/.." && pwd)"
+    fi
 
     if [[ -n "${LOCAL_BIN}" ]]; then
         if [[ ! -f "${LOCAL_BIN}" ]]; then
@@ -256,7 +264,12 @@ install_server_binary() {
     if [[ -n "${REPO}" ]]; then
         info "正在从 GitHub Release (${REPO}) 下载 xray-panel-server-linux-${ARCH}..."
         local url="https://github.com/${REPO}/releases/latest/download/xray-panel-server-linux-${ARCH}"
-        curl -fL --retry 3 -o "${BINARY_PATH}.tmp" "${url}"
+        if ! curl -fL --retry 3 -o "${BINARY_PATH}.tmp" "${url}"; then
+            rm -f "${BINARY_PATH}.tmp"
+            error "从 GitHub Release 下载失败: ${url}"
+            error "请确认仓库已推送 tag 并发布对应 Release，或先本地构建/打包后通过 --bin 指定本地二进制。"
+            exit 1
+        fi
         install -m 755 "${BINARY_PATH}.tmp" "${BINARY_PATH}"
         rm -f "${BINARY_PATH}.tmp"
         success "已下载并安装 ${BINARY_PATH}"
@@ -423,7 +436,25 @@ cmd_status() {
     systemctl status nginx --no-pager -l 2>/dev/null || echo "未安装或未运行"
 }
 
+print_usage() {
+    cat <<'EOF'
+Xray Panel Server 一键安装 / 升级 / 卸载 / 运维脚本
+适用系统: Ubuntu / Debian / CentOS / Rocky Linux / AlmaLinux / Alpine
+
+用法:
+  install.sh install [--bin /path/to/xray-panel-server] [--listen 127.0.0.1:8082]
+  install.sh update [--bin /path/to/xray-panel-server]
+  install.sh uninstall [--purge]
+  install.sh update-geo
+  install.sh status
+EOF
+}
+
 ACTION="${1:-install}"
+if [[ "${ACTION}" == "-h" || "${ACTION}" == "--help" ]]; then
+    print_usage
+    exit 0
+fi
 if [[ $# -gt 0 ]]; then
     shift
 fi
@@ -444,7 +475,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '3,14p' "$0"
+            print_usage
             exit 0
             ;;
         *)

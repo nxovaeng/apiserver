@@ -133,7 +133,7 @@ jobs:
           ### 在线安装
 
           \`\`\`bash
-          sudo bash <(curl -Ls https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh) install
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | sudo bash -s -- install
           \`\`\`
 
           ### 离线包安装

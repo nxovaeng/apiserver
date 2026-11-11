@@ -47,8 +47,8 @@ make test
 使用一键脚本 [`scripts/install.sh`](scripts/install.sh) 部署为系统服务 `xray-panel-server.service`（未指定 `--bin` 时默认从 `nxovaeng/apiserver` 最新 Release 下载）：
 
 ```bash
-# 在线一键安装（需先在 GitHub Releases 发布过至少一个版本）
-sudo bash <(curl -Ls https://raw.githubusercontent.com/nxovaeng/apiserver/main/scripts/install.sh) install
+# 在线一键安装（需先在 GitHub Releases 发布过至少一个版本；请使用管道传给 sudo bash）
+curl -fsSL https://raw.githubusercontent.com/nxovaeng/apiserver/main/scripts/install.sh | sudo bash -s -- install
 
 # 使用本地编译二进制安装（自动安装 Xray-core、Nginx、生成 config.yaml、创建初始 Token 并注册 systemd）
 sudo bash scripts/install.sh install --bin ./bin/xray-panel-server-linux-amd64
