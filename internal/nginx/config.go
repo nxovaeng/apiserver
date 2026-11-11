@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,21 +20,27 @@ const ManagedHeader = "# Managed by Xray Panel"
 
 // ConfigGenerator handles generating Nginx configurations.
 type ConfigGenerator struct {
-	configDir string
-	streamDir string
-	reloadCmd string
-	db        *gorm.DB
-	socketDir string
+	configDir   string
+	streamDir   string
+	reloadCmd   string
+	db          *gorm.DB
+	socketDir   string
+	panelListen string
 }
 
 // NewGenerator creates a new Nginx config generator.
 func NewGenerator(configDir, streamDir string) *ConfigGenerator {
 	return &ConfigGenerator{
-		configDir: configDir,
-		streamDir: streamDir,
-		reloadCmd: "systemctl reload nginx",
-		socketDir: "/dev/shm",
+		configDir:   configDir,
+		streamDir:   streamDir,
+		reloadCmd:   "systemctl reload nginx",
+		socketDir:   "/dev/shm",
+		panelListen: "127.0.0.1:8082",
 	}
+}
+
+func (g *ConfigGenerator) ConfigDir() string {
+	return g.configDir
 }
 
 func (g *ConfigGenerator) SetDB(db *gorm.DB) {
@@ -50,6 +57,23 @@ func (g *ConfigGenerator) SetSocketDir(dir string) {
 	if dir != "" {
 		g.socketDir = dir
 	}
+}
+
+func (g *ConfigGenerator) SetPanelListen(addr string) {
+	if addr != "" {
+		g.panelListen = addr
+	}
+}
+
+func (g *ConfigGenerator) panelTarget() string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(g.panelListen))
+	if err != nil || port == "" {
+		return "127.0.0.1:8082"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // Reload reloads Nginx configuration.
@@ -193,6 +217,23 @@ func (g *ConfigGenerator) buildServerBlock(domain string, inbounds []models.Inbo
 		Domain: domain,
 	}
 
+	if g.db != nil {
+		if models.GetSubNginxEnabled(g.db) {
+			subDom := models.GetSubDomain(g.db)
+			if subDom != "" && strings.EqualFold(domain, subDom) {
+				data.SubPath = models.GetSubPath(g.db)
+				data.PanelTarget = g.panelTarget()
+			}
+		}
+		if models.GetAPINginxEnabled(g.db) {
+			apiDom := models.GetAPIDomain(g.db)
+			if apiDom != "" && strings.EqualFold(domain, apiDom) {
+				data.ExposeAPI = true
+				data.PanelTarget = g.panelTarget()
+			}
+		}
+	}
+
 	if len(inbounds) > 0 && inbounds[0].Domain != nil {
 		d := inbounds[0].Domain
 		data.HasCert = true
@@ -237,4 +278,134 @@ func (g *ConfigGenerator) buildServerBlock(domain string, inbounds []models.Inbo
 	}
 
 	return buf.String()
+}
+
+// EndpointProxySpec describes standalone HTTPS Nginx reverse proxy routing for a domain.
+type EndpointProxySpec struct {
+	Domain    string
+	CertPath  string
+	KeyPath   string
+	SubPath   string
+	ExposeAPI bool
+}
+
+// SyncEndpointProxies writes standalone endpoint proxy configs (API and/or subscription) for desired domains
+// and cleans up any previously managed endpoint configs that are no longer desired (or now shared by an inbound).
+func (g *ConfigGenerator) SyncEndpointProxies(desired map[string]EndpointProxySpec) (map[string]string, error) {
+	if g.db != nil {
+		var existing []models.NginxConfig
+		if err := g.db.Where("config_type IN ?", []string{"subscription", "api", "endpoint"}).Find(&existing).Error; err == nil {
+			for _, cfg := range existing {
+				keep := false
+				for dom := range desired {
+					if strings.EqualFold(cfg.Domain, dom) {
+						keep = true
+						break
+					}
+				}
+				if !keep {
+					if cfg.IsManaged && g.isManagedFile(cfg.ConfigPath) {
+						_ = os.Remove(cfg.ConfigPath)
+					}
+					_ = g.db.Delete(&cfg).Error
+				}
+			}
+		}
+	}
+
+	written := make(map[string]string, len(desired))
+	for _, spec := range desired {
+		filename := filepath.Join(g.configDir, fmt.Sprintf("%s.conf", spec.Domain))
+		subPath := ""
+		if spec.SubPath != "" {
+			subPath = models.NormalizeSubPath(spec.SubPath)
+		}
+		data := subTmplData{
+			Domain:      spec.Domain,
+			CertPath:    spec.CertPath,
+			KeyPath:     spec.KeyPath,
+			SubPath:     subPath,
+			ExposeAPI:   spec.ExposeAPI,
+			PanelTarget: g.panelTarget(),
+		}
+
+		var buf bytes.Buffer
+		if err := subConfigTmpl.Execute(&buf, data); err != nil {
+			return nil, fmt.Errorf("failed to execute endpoint nginx template for %s: %w", spec.Domain, err)
+		}
+		if err := g.writeConfig(filename, buf.String()); err != nil {
+			return nil, err
+		}
+		if err := g.recordConfig("", spec.Domain, filename, "endpoint"); err != nil {
+			applogger.Warn("failed to record endpoint nginx config for %s: %v", spec.Domain, err)
+		}
+		written[strings.ToLower(spec.Domain)] = filename
+	}
+	return written, nil
+}
+
+// GenerateSubscriptionConfig generates a standalone subscription-only Nginx HTTPS server config
+// for domain if no active inbound config already owns that domain, cleaning up stale subscription files.
+func (g *ConfigGenerator) GenerateSubscriptionConfig(domain, subPath, certPath, keyPath string, sharedWithInbound bool) (string, error) {
+	if err := g.CleanupSubscriptionConfigsExcept(domain, sharedWithInbound); err != nil {
+		applogger.Warn("cleanup stale subscription nginx configs failed: %v", err)
+	}
+
+	filename := filepath.Join(g.configDir, fmt.Sprintf("%s.conf", domain))
+	if sharedWithInbound {
+		return filename, nil
+	}
+
+	written, err := g.SyncEndpointProxies(map[string]EndpointProxySpec{
+		strings.ToLower(domain): {
+			Domain:   domain,
+			CertPath: certPath,
+			KeyPath:  keyPath,
+			SubPath:  subPath,
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return written[strings.ToLower(domain)], nil
+}
+
+// CleanupSubscriptionConfigsExcept removes managed standalone endpoint/subscription Nginx configs.
+func (g *ConfigGenerator) CleanupSubscriptionConfigsExcept(keepDomain string, removeAllForKeep bool) error {
+	if g.db == nil {
+		return nil
+	}
+	var configs []models.NginxConfig
+	if err := g.db.Where("config_type IN ?", []string{"subscription", "api", "endpoint"}).Find(&configs).Error; err != nil {
+		return err
+	}
+	for _, cfg := range configs {
+		if keepDomain != "" && !removeAllForKeep && strings.EqualFold(cfg.Domain, keepDomain) {
+			continue
+		}
+		if !removeAllForKeep || !strings.EqualFold(cfg.Domain, keepDomain) {
+			if cfg.IsManaged && g.isManagedFile(cfg.ConfigPath) {
+				_ = os.Remove(cfg.ConfigPath)
+			}
+		}
+		_ = g.db.Delete(&cfg).Error
+	}
+	return nil
+}
+
+// CleanupSubscriptionConfigs removes all managed standalone endpoint Nginx configs.
+func (g *ConfigGenerator) CleanupSubscriptionConfigs() error {
+	return g.CleanupSubscriptionConfigsExcept("", false)
+}
+
+// TestConfig validates nginx syntax when nginx binary is available.
+func (g *ConfigGenerator) TestConfig() error {
+	if _, err := exec.LookPath("nginx"); err != nil {
+		return nil
+	}
+	out, err := exec.Command("nginx", "-t").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }

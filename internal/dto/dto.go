@@ -508,6 +508,38 @@ type ImportCertRequest struct {
 	KeyPath  string `json:"key_path" binding:"required"`
 }
 
+type UploadCertRequest struct {
+	Domain  string `json:"domain" binding:"required"`
+	Type    string `json:"type"`
+	CertPEM string `json:"cert_pem" binding:"required"`
+	KeyPEM  string `json:"key_pem" binding:"required"`
+	Enabled *bool  `json:"enabled"`
+}
+
+type IssueCertRequest struct {
+	Domain          string `json:"domain" binding:"required"`
+	IncludeWildcard bool   `json:"include_wildcard"`
+	Type            string `json:"type"`
+	Provider        string `json:"provider" binding:"required"` // cf | luadns
+	CFToken         string `json:"cf_token"`
+	CFKey           string `json:"cf_key"`
+	CFEmail         string `json:"cf_email"`
+	CFZoneID        string `json:"cf_zone_id"`
+	LuaKey          string `json:"lua_key"`
+	LuaEmail        string `json:"lua_email"`
+	CAServer        string `json:"ca_server"` // letsencrypt | zerossl
+	Email           string `json:"email"`
+	Force           bool   `json:"force"`
+}
+
+type IssueCertResponse struct {
+	Domain         DomainDTO `json:"domain"`
+	Provider       string    `json:"provider"`
+	CAServer       string    `json:"ca_server"`
+	ReusedExisting bool      `json:"reused_existing"`
+	Output         string    `json:"output"`
+}
+
 // ===== WireGuard =====
 
 type WGServiceStatus struct {
@@ -651,6 +683,9 @@ type SettingsDTO struct {
 	PanelTitle              string `json:"panel_title"`
 	SubDomain               string `json:"sub_domain"`
 	SubPath                 string `json:"sub_path"`
+	SubNginxEnabled         bool   `json:"sub_nginx_enabled"`
+	APIDomain               string `json:"api_domain"`
+	APINginxEnabled         bool   `json:"api_nginx_enabled"`
 	ServerPublicHost        string `json:"server_public_host"`
 	XrayLogLevel            string `json:"xray_log_level"`
 	EnableTrafficStats      bool   `json:"enable_traffic_stats"`
@@ -667,6 +702,9 @@ type UpdateSettingsRequest struct {
 	PanelTitle           *string `json:"panel_title"`
 	SubDomain            *string `json:"sub_domain"`
 	SubPath              *string `json:"sub_path"`
+	SubNginxEnabled      *bool   `json:"sub_nginx_enabled"`
+	APIDomain            *string `json:"api_domain"`
+	APINginxEnabled      *bool   `json:"api_nginx_enabled"`
 	ServerPublicHost     *string `json:"server_public_host"`
 	XrayLogLevel         *string `json:"xray_log_level"`
 	EnableTrafficStats   *bool   `json:"enable_traffic_stats"`
@@ -674,6 +712,62 @@ type UpdateSettingsRequest struct {
 	DefaultTrafficLimit  *int64  `json:"default_traffic_limit"`
 	DefaultExpireDays    *int    `json:"default_expire_days"`
 	DirectDomainStrategy *string `json:"direct_domain_strategy"`
+}
+
+type SubscriptionNginxResponse struct {
+	Enabled           bool   `json:"enabled"`
+	Domain            string `json:"domain"`
+	SubPath           string `json:"sub_path"`
+	ConfigPath        string `json:"config_path"`
+	MatchedCertDomain string `json:"matched_cert_domain"`
+	Reloaded          bool   `json:"reloaded"`
+	Message           string `json:"message"`
+}
+
+type APINginxResponse struct {
+	Enabled           bool   `json:"enabled"`
+	Domain            string `json:"domain"`
+	DirectURL         string `json:"direct_url"`
+	ConfigPath        string `json:"config_path"`
+	MatchedCertDomain string `json:"matched_cert_domain"`
+	Reloaded          bool   `json:"reloaded"`
+	Message           string `json:"message"`
+}
+
+// ===== Cloudflare Tunnel =====
+
+type CFTunnelStatus struct {
+	IsLinux             bool   `json:"is_linux"`
+	Installed           bool   `json:"installed"`
+	BinaryPath          string `json:"binary_path"`
+	Version             string `json:"version"`
+	ServiceInstalled    bool   `json:"service_installed"`
+	Active              bool   `json:"active"`
+	Enabled             bool   `json:"enabled"`
+	Status              string `json:"status"`
+	PanelListen         string `json:"panel_listen"`
+	SubDomain           string `json:"sub_domain"`
+	SubPath             string `json:"sub_path"`
+	RecommendedService  string `json:"recommended_service"`
+	RecommendedPathRule string `json:"recommended_path_rule"`
+}
+
+type CFTunnelSetupRequest struct {
+	TunnelToken string `json:"tunnel_token" binding:"required"`
+}
+
+type CFTunnelInstallResponse struct {
+	Installed  bool   `json:"installed"`
+	BinaryPath string `json:"binary_path"`
+	Version    string `json:"version"`
+	Message    string `json:"message"`
+}
+
+type CFTunnelActionResponse struct {
+	Action  string         `json:"action"`
+	Success bool           `json:"success"`
+	Status  CFTunnelStatus `json:"status"`
+	Message string         `json:"message"`
 }
 
 type PanelRestartResponse struct {

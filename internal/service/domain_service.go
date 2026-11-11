@@ -1,8 +1,12 @@
 package service
 
 import (
+	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -18,14 +22,29 @@ import (
 
 var domainRegex = regexp.MustCompile(`^(\*\.)?([a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`)
 
-// DomainService manages domains and TLS/ACME certificate discovery & import.
+// AcmeRunner executes acme.sh commands with isolated environment credentials.
+type AcmeRunner interface {
+	Run(ctx context.Context, args []string, extraEnv []string) (output string, exitCode int, err error)
+}
+
+// DomainService manages domains and TLS/ACME certificate discovery, upload, and issuance.
 type DomainService struct {
-	db  *gorm.DB
-	cfg *config.Config
+	db         *gorm.DB
+	cfg        *config.Config
+	acmeRunner AcmeRunner
 }
 
 func NewDomainService(db *gorm.DB, cfg *config.Config) *DomainService {
-	return &DomainService{db: db, cfg: cfg}
+	s := &DomainService{db: db, cfg: cfg}
+	s.acmeRunner = &execAcmeRunner{certDirFn: s.certDir}
+	return s
+}
+
+// SetAcmeRunner injects a custom ACME runner (for testing).
+func (s *DomainService) SetAcmeRunner(runner AcmeRunner) {
+	if runner != nil {
+		s.acmeRunner = runner
+	}
 }
 
 func (s *DomainService) List() (*dto.DomainListResponse, error) {
@@ -313,6 +332,360 @@ func (s *DomainService) ImportSingleCertificate(req dto.ImportCertRequest) (*dto
 	}
 	dto := toDomainDTO(newDomain)
 	return &dto, nil
+}
+
+// UploadCertificate validates and saves PEM certificate + private key files to certDir and upserts Domain.
+func (s *DomainService) UploadCertificate(req dto.UploadCertRequest) (*dto.DomainDTO, error) {
+	domainName := strings.TrimSpace(req.Domain)
+	if !validateDomainFormat(domainName) {
+		return nil, NewValidationError("域名格式无效")
+	}
+
+	dtype := models.DomainTypeDirect
+	if req.Type != "" {
+		dtype = models.DomainType(strings.TrimSpace(req.Type))
+	}
+	if dtype != models.DomainTypeDirect && dtype != models.DomainTypeCDN {
+		return nil, NewValidationError("上传证书仅支持 direct 或 cdn 域名类型")
+	}
+
+	certPEM := strings.TrimSpace(req.CertPEM)
+	keyPEM := strings.TrimSpace(req.KeyPEM)
+	if certPEM == "" || keyPEM == "" {
+		return nil, NewValidationError("证书内容与私钥内容不能为空")
+	}
+
+	if _, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM)); err != nil {
+		return nil, NewValidationError("证书与私钥解析失败或不匹配: " + err.Error())
+	}
+
+	_, _, certDomains, isWildcard, parseErr := utils.ParseCertificateDetailsFromBytes([]byte(certPEM), domainName)
+	if parseErr != nil {
+		return nil, NewValidationError("解析 X.509 证书失败: " + parseErr.Error())
+	}
+	if strings.HasPrefix(domainName, "*.") {
+		isWildcard = true
+	} else {
+		for _, d := range certDomains {
+			if strings.HasPrefix(d, "*.") {
+				isWildcard = true
+				break
+			}
+		}
+	}
+
+	certDir := s.certDir()
+	safeFolder := sanitizeCertFolderName(domainName)
+	targetDir := filepath.Clean(filepath.Join(certDir, safeFolder))
+	if !strings.HasPrefix(targetDir, filepath.Clean(certDir)+string(os.PathSeparator)) {
+		return nil, NewValidationError("非法的证书存储路径")
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return nil, NewInternalError("创建证书目录失败", err)
+	}
+
+	certPath := filepath.Join(targetDir, "fullchain.pem")
+	keyPath := filepath.Join(targetDir, "privkey.pem")
+	if err := os.WriteFile(certPath, []byte(certPEM+"\n"), 0644); err != nil {
+		return nil, NewInternalError("写入证书文件失败", err)
+	}
+	if err := os.WriteFile(keyPath, []byte(keyPEM+"\n"), 0600); err != nil {
+		return nil, NewInternalError("写入私钥文件失败", err)
+	}
+
+	return s.upsertCertDomain(domainName, dtype, isWildcard, certPath, keyPath, req.Enabled)
+}
+
+// IssueCertificate issues a TLS certificate using DNS-01 ACME (Cloudflare or LuaDNS) via acme.sh.
+func (s *DomainService) IssueCertificate(ctx context.Context, req dto.IssueCertRequest) (*dto.IssueCertResponse, error) {
+	domainName := strings.TrimSpace(req.Domain)
+	if !validateDomainFormat(domainName) {
+		return nil, NewValidationError("域名格式无效")
+	}
+
+	dtype := models.DomainTypeDirect
+	if req.Type != "" {
+		dtype = models.DomainType(strings.TrimSpace(req.Type))
+	}
+	if dtype != models.DomainTypeDirect && dtype != models.DomainTypeCDN {
+		return nil, NewValidationError("申请证书仅支持 direct 或 cdn 域名类型")
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(req.Provider))
+	var dnsPlugin string
+	var extraEnv []string
+	var secretsToRedact []string
+
+	switch provider {
+	case "cf", "cloudflare":
+		provider = "cf"
+		dnsPlugin = "dns_cf"
+		cfToken := strings.TrimSpace(req.CFToken)
+		cfKey := strings.TrimSpace(req.CFKey)
+		cfEmail := strings.TrimSpace(req.CFEmail)
+		cfZoneID := strings.TrimSpace(req.CFZoneID)
+		if cfToken != "" {
+			extraEnv = append(extraEnv, "CF_Token="+cfToken)
+			secretsToRedact = append(secretsToRedact, cfToken)
+			if cfZoneID != "" {
+				extraEnv = append(extraEnv, "CF_Zone_ID="+cfZoneID)
+			}
+		} else if cfKey != "" && cfEmail != "" {
+			extraEnv = append(extraEnv, "CF_Key="+cfKey, "CF_Email="+cfEmail)
+			secretsToRedact = append(secretsToRedact, cfKey)
+			if cfZoneID != "" {
+				extraEnv = append(extraEnv, "CF_Zone_ID="+cfZoneID)
+			}
+		} else {
+			return nil, NewValidationError("Cloudflare 需提供 CF_Token，或同时提供 CF_Key 与 CF_Email")
+		}
+	case "luadns", "lua":
+		provider = "luadns"
+		dnsPlugin = "dns_lua"
+		luaKey := strings.TrimSpace(req.LuaKey)
+		luaEmail := strings.TrimSpace(req.LuaEmail)
+		if luaKey == "" || luaEmail == "" {
+			return nil, NewValidationError("LuaDNS 必须提供 lua_key 与 lua_email")
+		}
+		extraEnv = append(extraEnv, "LUA_Key="+luaKey, "LUA_Email="+luaEmail)
+		secretsToRedact = append(secretsToRedact, luaKey)
+	default:
+		return nil, NewValidationError("不支持的 DNS 服务商，当前支持: cf (Cloudflare), luadns")
+	}
+
+	caServer := strings.ToLower(strings.TrimSpace(req.CAServer))
+	if caServer == "" {
+		caServer = "letsencrypt"
+	}
+	if caServer != "letsencrypt" && caServer != "zerossl" {
+		return nil, NewValidationError("不支持的 CA 服务商，允许值: letsencrypt, zerossl")
+	}
+	email := strings.TrimSpace(req.Email)
+	if caServer == "zerossl" && email == "" {
+		return nil, NewValidationError("使用 ZeroSSL 申请证书时必须填写邮箱 (email)")
+	}
+
+	baseDomain := strings.TrimPrefix(domainName, "*.")
+	wantWildcard := req.IncludeWildcard || strings.HasPrefix(domainName, "*.")
+	storedDomain := baseDomain
+	if wantWildcard {
+		storedDomain = "*." + baseDomain
+	}
+
+	if email != "" {
+		regArgs := []string{"--register-account", "-m", email, "--server", caServer}
+		_, _, _ = s.acmeRunner.Run(ctx, regArgs, extraEnv)
+	}
+
+	issueArgs := []string{"--issue", "--dns", dnsPlugin, "--server", caServer, "-d", baseDomain}
+	if wantWildcard {
+		issueArgs = append(issueArgs, "-d", "*."+baseDomain)
+	}
+	reloadCmd := "systemctl reload nginx"
+	if s.cfg != nil && s.cfg.Nginx.ReloadCmd != "" {
+		reloadCmd = s.cfg.Nginx.ReloadCmd
+	}
+	issueArgs = append(issueArgs, "--reloadcmd", reloadCmd)
+	if req.Force {
+		issueArgs = append(issueArgs, "--force")
+	}
+
+	output, exitCode, runErr := s.acmeRunner.Run(ctx, issueArgs, extraEnv)
+	cleanOutput := redactSecrets(output, secretsToRedact)
+	reused := false
+
+	if runErr != nil {
+		if exitCode == 2 {
+			// acme.sh returns exit code 2 when certificate is unchanged / skipped
+			reused = true
+		} else {
+			return nil, NewSystemCommandError("ACME 证书申请失败: "+cleanOutput, runErr)
+		}
+	}
+
+	certPath, keyPath, ok := resolveIssuedCertPaths(s.certDir(), baseDomain)
+	if !ok {
+		return nil, NewSystemCommandError("证书命令执行完成但未找到签发文件: "+cleanOutput, errors.New("issued cert files missing"))
+	}
+
+	domDTO, err := s.upsertCertDomain(storedDomain, dtype, wantWildcard, certPath, keyPath, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return &dto.IssueCertResponse{
+		Domain:         *domDTO,
+		Provider:       provider,
+		CAServer:       caServer,
+		ReusedExisting: reused,
+		Output:         cleanOutput,
+	}, nil
+}
+
+func (s *DomainService) upsertCertDomain(domainName string, dtype models.DomainType, isWildcard bool, certPath, keyPath string, enabledPtr *bool) (*dto.DomainDTO, error) {
+	var existing models.Domain
+	if err := s.db.Where("domain = ?", domainName).First(&existing).Error; err == nil {
+		existing.Type = dtype
+		existing.IsWildcard = isWildcard
+		existing.CertPath = certPath
+		existing.KeyPath = keyPath
+		if enabledPtr != nil {
+			existing.Enabled = *enabledPtr
+		} else {
+			existing.Enabled = true
+		}
+		if err := s.db.Save(&existing).Error; err != nil {
+			return nil, NewInternalError("更新域名证书记录失败", err)
+		}
+		dto := toDomainDTO(existing)
+		return &dto, nil
+	}
+
+	enabled := true
+	if enabledPtr != nil {
+		enabled = *enabledPtr
+	}
+	newDomain := models.Domain{
+		Domain:     domainName,
+		Type:       dtype,
+		IsWildcard: isWildcard,
+		CertPath:   certPath,
+		KeyPath:    keyPath,
+		Enabled:    enabled,
+	}
+	if err := s.db.Create(&newDomain).Error; err != nil {
+		return nil, NewInternalError("保存域名证书记录失败", err)
+	}
+	dto := toDomainDTO(newDomain)
+	return &dto, nil
+}
+
+func sanitizeCertFolderName(domain string) string {
+	cleaned := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(domain)), "*.", "_wildcard.")
+	cleaned = strings.ReplaceAll(cleaned, "/", "_")
+	cleaned = strings.ReplaceAll(cleaned, "..", "_")
+	return cleaned
+}
+
+func resolveIssuedCertPaths(certDir, baseDomain string) (string, string, bool) {
+	candidates := []string{
+		filepath.Join(certDir, baseDomain+"_ecc"),
+		filepath.Join(certDir, baseDomain),
+		filepath.Join(certDir, baseDomain+"_rsa"),
+	}
+	for _, dir := range candidates {
+		fullchain := filepath.Join(dir, "fullchain.cer")
+		certFallback := filepath.Join(dir, baseDomain+".cer")
+		keyFile := filepath.Join(dir, baseDomain+".key")
+		if fileExists(keyFile) {
+			if fileExists(fullchain) {
+				return fullchain, keyFile, true
+			}
+			if fileExists(certFallback) {
+				return certFallback, keyFile, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+func redactSecrets(text string, secrets []string) string {
+	res := text
+	for _, sec := range secrets {
+		if sec != "" {
+			res = strings.ReplaceAll(res, sec, "***")
+		}
+	}
+	return strings.TrimSpace(res)
+}
+
+type execAcmeRunner struct {
+	certDirFn func() string
+}
+
+func (r *execAcmeRunner) Run(ctx context.Context, args []string, extraEnv []string) (string, int, error) {
+	acmeBin, err := ensureAcmeShBinary(ctx, r.certDirFn())
+	if err != nil {
+		return err.Error(), -1, err
+	}
+
+	homeDir := r.certDirFn()
+	fullArgs := append([]string{"--home", homeDir}, args...)
+	cmd := exec.CommandContext(ctx, acmeBin, fullArgs...)
+	cmd.Env = append(os.Environ(), extraEnv...)
+
+	outBytes, runErr := cmd.CombinedOutput()
+	output := string(outBytes)
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			return output, exitErr.ExitCode(), runErr
+		}
+		return output, -1, runErr
+	}
+	return output, 0, nil
+}
+
+func ensureAcmeShBinary(ctx context.Context, homeDir string) (string, error) {
+	candidates := []string{
+		filepath.Join(homeDir, "acme.sh"),
+		"/root/.acme.sh/acme.sh",
+	}
+	for _, c := range candidates {
+		if fileExists(c) {
+			return c, nil
+		}
+	}
+	if p, err := exec.LookPath("acme.sh"); err == nil {
+		return p, nil
+	}
+
+	// Auto-install acme.sh if absent (e.g. fresh Debian server)
+	cmd := exec.CommandContext(ctx, "bash", "-c", `curl -fsSL https://get.acme.sh | sh -s -- --home "$ACME_HOME_DIR"`)
+	cmd.Env = append(os.Environ(), "ACME_HOME_DIR="+homeDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("未安装 acme.sh 且自动安装失败: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	installed := filepath.Join(homeDir, "acme.sh")
+	if fileExists(installed) {
+		return installed, nil
+	}
+	return "", fmt.Errorf("未找到 acme.sh 可执行文件")
+}
+
+// findMatchingDomainCert locates an enabled direct/cdn Domain with existing cert+key files matching host
+// (exact match first, then *.parent wildcard match).
+func findMatchingDomainCert(db *gorm.DB, host string) (*models.Domain, error) {
+	target := strings.ToLower(strings.TrimSpace(host))
+	if target == "" {
+		return nil, NewValidationError("域名不能为空")
+	}
+
+	var domains []models.Domain
+	if err := db.Where("enabled = ? AND type IN ?", true, []string{string(models.DomainTypeDirect), string(models.DomainTypeCDN)}).
+		Order("is_wildcard ASC, created_at DESC").Find(&domains).Error; err != nil {
+		return nil, NewInternalError("查询域名证书失败", err)
+	}
+
+	for i := range domains {
+		d := &domains[i]
+		if strings.EqualFold(d.Domain, target) && fileExists(d.CertPath) && fileExists(d.KeyPath) {
+			return d, nil
+		}
+	}
+
+	parts := strings.SplitN(target, ".", 2)
+	if len(parts) == 2 {
+		wildcardName := "*." + parts[1]
+		for i := range domains {
+			d := &domains[i]
+			if strings.EqualFold(d.Domain, wildcardName) && fileExists(d.CertPath) && fileExists(d.KeyPath) {
+				return d, nil
+			}
+		}
+	}
+
+	return nil, nil
 }
 
 func (s *DomainService) certDir() string {

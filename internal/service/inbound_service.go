@@ -336,6 +336,12 @@ func (s *InboundService) Delete(id string) (*dto.DeleteResponse, error) {
 		return nil, NewInternalError("Failed to delete inbound", err)
 	}
 
+	if s.nginxGen != nil {
+		if _, syncErr := syncManagedNginx(s.db, s.nginxGen, true, ""); syncErr != nil {
+			applogger.Warn("Failed to re-sync Nginx after deleting inbound %s: %v", id, syncErr)
+		}
+	}
+
 	return &dto.DeleteResponse{ID: id, Deleted: true}, nil
 }
 
@@ -423,12 +429,8 @@ func (s *InboundService) syncInboundNginx(inb *models.Inbound) {
 	if s.nginxGen == nil || inb.Domain == nil {
 		return
 	}
-	if err := s.nginxGen.GenerateHTTPConfig([]models.Inbound{*inb}); err != nil {
-		applogger.Error("Failed to generate Nginx config for inbound %s: %v", inb.Tag, err)
-		return
-	}
-	if err := s.nginxGen.Reload(); err != nil {
-		applogger.Warn("Failed to reload Nginx after inbound %s sync: %v", inb.Tag, err)
+	if _, err := syncManagedNginx(s.db, s.nginxGen, true, ""); err != nil {
+		applogger.Warn("Failed to sync Nginx after inbound %s update: %v", inb.Tag, err)
 	}
 }
 

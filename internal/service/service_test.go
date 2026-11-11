@@ -1,12 +1,14 @@
 package service_test
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -444,5 +446,270 @@ func TestSettingsAndXrayApplyValidation(t *testing.T) {
 		t.Fatalf("expected XRAY_VALIDATION_FAILED error")
 	} else if appErr, ok := service.AsAppError(err); !ok || appErr.Code != dto.ErrXrayValidationFailed {
 		t.Fatalf("expected ErrXrayValidationFailed, got %v", err)
+	}
+}
+
+type fakeAcmeRunner struct {
+	certDir string
+	calls   [][]string
+	envs    [][]string
+	fail    bool
+	code    int
+	out     string
+}
+
+func (f *fakeAcmeRunner) Run(ctx context.Context, args []string, extraEnv []string) (string, int, error) {
+	f.calls = append(f.calls, append([]string{}, args...))
+	f.envs = append(f.envs, append([]string{}, extraEnv...))
+	if f.fail {
+		return f.out, f.code, errors.New("acme failed")
+	}
+	// Find -d base domain and emit valid self-signed files
+	var baseDomain string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-d" && !strings.HasPrefix(args[i+1], "*.") {
+			baseDomain = args[i+1]
+			break
+		}
+	}
+	if baseDomain != "" && f.code != -99 {
+		eccDir := filepath.Join(f.certDir, baseDomain+"_ecc")
+		_ = os.MkdirAll(eccDir, 0755)
+		priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(2),
+			Subject:      pkix.Name{CommonName: baseDomain},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(90 * 24 * time.Hour),
+			DNSNames:     []string{baseDomain, "*." + baseDomain},
+		}
+		der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+		keyDER, _ := x509.MarshalECPrivateKey(priv)
+		_ = os.WriteFile(filepath.Join(eccDir, "fullchain.cer"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0644)
+		_ = os.WriteFile(filepath.Join(eccDir, baseDomain+".key"), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0600)
+	}
+	if f.code == 2 {
+		return f.out, 2, errors.New("exit status 2")
+	}
+	return f.out, 0, nil
+}
+
+func TestCertificateUploadACMEIssueAndSubNginxProxy(t *testing.T) {
+	db, cfg, tmpDir := setupTestEnv(t)
+	if _, err := database.Seed(db, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	domSvc := service.NewDomainService(db, cfg)
+
+	// 1. Generate valid PEM pair and a mismatched key, test UploadCertificate
+	certFile := filepath.Join(tmpDir, "src.pem")
+	keyFile := filepath.Join(tmpDir, "src.key")
+	otherCert := filepath.Join(tmpDir, "other.pem")
+	otherKey := filepath.Join(tmpDir, "other.key")
+	writeSelfSignedCert(t, certFile, keyFile, []string{"sub.example.com"})
+	writeSelfSignedCert(t, otherCert, otherKey, []string{"other.example.com"})
+
+	certBytes, _ := os.ReadFile(certFile)
+	keyBytes, _ := os.ReadFile(keyFile)
+	otherKeyBytes, _ := os.ReadFile(otherKey)
+
+	if _, err := domSvc.UploadCertificate(dto.UploadCertRequest{
+		Domain:  "sub.example.com",
+		CertPEM: string(certBytes),
+		KeyPEM:  string(otherKeyBytes),
+	}); err == nil {
+		t.Fatalf("expected validation error for mismatched certificate and private key")
+	}
+
+	uploaded, err := domSvc.UploadCertificate(dto.UploadCertRequest{
+		Domain:  "sub.example.com",
+		Type:    "direct",
+		CertPEM: string(certBytes),
+		KeyPEM:  string(keyBytes),
+	})
+	if err != nil || !uploaded.HasCert || uploaded.Domain != "sub.example.com" {
+		t.Fatalf("UploadCertificate failed: %+v err=%v", uploaded, err)
+	}
+
+	// 2. Test ACME IssueCertificate with Cloudflare and LuaDNS + secret redaction
+	runner := &fakeAcmeRunner{certDir: cfg.Nginx.CertDir, out: "issued ok"}
+	domSvc.SetAcmeRunner(runner)
+
+	cfRes, err := domSvc.IssueCertificate(context.Background(), dto.IssueCertRequest{
+		Domain:          "cf.example.com",
+		IncludeWildcard: true,
+		Provider:        "cf",
+		CFToken:         "cf-secret-token-xyz",
+		CAServer:        "letsencrypt",
+	})
+	if err != nil || cfRes.Domain.Domain != "*.cf.example.com" || !cfRes.Domain.IsWildcard || !cfRes.Domain.HasCert {
+		t.Fatalf("IssueCertificate cf failed: %+v err=%v", cfRes, err)
+	}
+	if len(runner.envs) == 0 || !strings.Contains(strings.Join(runner.envs[0], ","), "CF_Token=cf-secret-token-xyz") {
+		t.Fatalf("expected CF_Token env passed to acme runner, got %+v", runner.envs)
+	}
+
+	luaRes, err := domSvc.IssueCertificate(context.Background(), dto.IssueCertRequest{
+		Domain:   "lua.example.com",
+		Provider: "luadns",
+		LuaKey:   "lua-secret-key",
+		LuaEmail: "ops@example.com",
+	})
+	if err != nil || luaRes.Provider != "luadns" || luaRes.Domain.Domain != "lua.example.com" {
+		t.Fatalf("IssueCertificate luadns failed: %+v err=%v", luaRes, err)
+	}
+
+	// Secret redaction check on error
+	failRunner := &fakeAcmeRunner{certDir: cfg.Nginx.CertDir, fail: true, code: 1, out: "bad token: cf-secret-999"}
+	domSvc.SetAcmeRunner(failRunner)
+	_, err = domSvc.IssueCertificate(context.Background(), dto.IssueCertRequest{
+		Domain:   "bad.example.com",
+		Provider: "cf",
+		CFToken:  "cf-secret-999",
+	})
+	if err == nil || strings.Contains(err.Error(), "cf-secret-999") {
+		t.Fatalf("expected redacted secret in error message, got %v", err)
+	}
+
+	// 3. Subscription Nginx proxy standalone & shared inbound + disable cleanup
+	nginxGen := nginx.NewGenerator(cfg.Nginx.ConfigDir, cfg.Nginx.StreamDir)
+	nginxGen.SetDB(db)
+	nginxGen.SetReloadCmd("true")
+	nginxGen.SetPanelListen("127.0.0.1:8082")
+	sysSvc := service.NewSystemService(db, cfg, nginxGen)
+
+	subDom := "sub.cf.example.com" // should match *.cf.example.com wildcard cert!
+	subPrefix := "/my-feed"
+	if _, err := sysSvc.UpdateSettings(dto.UpdateSettingsRequest{SubDomain: &subDom, SubPath: &subPrefix}); err != nil {
+		t.Fatal(err)
+	}
+	subResp, err := sysSvc.ApplySubscriptionNginx()
+	if err != nil || !subResp.Enabled || subResp.MatchedCertDomain != "*.cf.example.com" {
+		t.Fatalf("ApplySubscriptionNginx failed: %+v err=%v", subResp, err)
+	}
+	rawConf, err := os.ReadFile(subResp.ConfigPath)
+	if err != nil {
+		t.Fatalf("read generated subscription nginx config: %v", err)
+	}
+	confStr := string(rawConf)
+	if !strings.Contains(confStr, "location ^~ /my-feed/") || !strings.Contains(confStr, "return 404;") {
+		t.Fatalf("unexpected subscription nginx config:\n%s", confStr)
+	}
+
+	// Disabling removes standalone subscription nginx file
+	if _, err := sysSvc.DisableSubscriptionNginx(); err != nil {
+		t.Fatalf("DisableSubscriptionNginx: %v", err)
+	}
+	if _, err := os.Stat(subResp.ConfigPath); !os.IsNotExist(err) {
+		t.Fatalf("expected %s removed after disabling subscription nginx", subResp.ConfigPath)
+	}
+
+	// 4. API domain Nginx reverse proxy (HTTPS/CDN ready, merges cleanly when sharing sub_domain!)
+	apiDom := "sub.cf.example.com"
+	if _, err := sysSvc.UpdateSettings(dto.UpdateSettingsRequest{APIDomain: &apiDom}); err != nil {
+		t.Fatal(err)
+	}
+	apiResp, err := sysSvc.ApplyAPINginx()
+	if err != nil || !apiResp.Enabled || apiResp.DirectURL != "https://sub.cf.example.com" || apiResp.MatchedCertDomain != "*.cf.example.com" {
+		t.Fatalf("ApplyAPINginx failed: %+v err=%v", apiResp, err)
+	}
+	// Enable subscription on the SAME domain: both /api/v1/ and /my-feed/ must coexist in one file
+	if _, err := sysSvc.ApplySubscriptionNginx(); err != nil {
+		t.Fatalf("ApplySubscriptionNginx on shared domain: %v", err)
+	}
+	mergedRaw, err := os.ReadFile(apiResp.ConfigPath)
+	if err != nil {
+		t.Fatalf("read merged endpoint nginx config: %v", err)
+	}
+	mergedStr := string(mergedRaw)
+	if !strings.Contains(mergedStr, "location ^~ /api/v1/") || !strings.Contains(mergedStr, "location ^~ /my-feed/") || !strings.Contains(mergedStr, "proxy_buffering off;") {
+		t.Fatalf("expected merged API + subscription Nginx directives:\n%s", mergedStr)
+	}
+
+	// Disabling subscription leaves API proxy active on that shared domain
+	if _, err := sysSvc.DisableSubscriptionNginx(); err != nil {
+		t.Fatalf("DisableSubscriptionNginx while API active: %v", err)
+	}
+	afterSubOffRaw, err := os.ReadFile(apiResp.ConfigPath)
+	if err != nil {
+		t.Fatalf("expected API config file preserved when subscription disabled: %v", err)
+	}
+	if !strings.Contains(string(afterSubOffRaw), "location ^~ /api/v1/") || strings.Contains(string(afterSubOffRaw), "location ^~ /my-feed/") {
+		t.Fatalf("unexpected config after disabling sub while API active:\n%s", string(afterSubOffRaw))
+	}
+
+	// Disabling API removes the file completely
+	if _, err := sysSvc.DisableAPINginx(); err != nil {
+		t.Fatalf("DisableAPINginx: %v", err)
+	}
+	if _, err := os.Stat(apiResp.ConfigPath); !os.IsNotExist(err) {
+		t.Fatalf("expected %s removed after disabling API nginx", apiResp.ConfigPath)
+	}
+}
+
+type fakeTunnelRunner struct {
+	installed bool
+	calls     [][]string
+}
+
+func (r *fakeTunnelRunner) LookPath(name string) (string, error) {
+	if name == "cloudflared" && r.installed {
+		return "/usr/local/bin/cloudflared", nil
+	}
+	return "", errors.New("not found")
+}
+
+func (r *fakeTunnelRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	r.calls = append(r.calls, append([]string{name}, args...))
+	if len(args) > 0 && args[0] == "--version" {
+		return "cloudflared version 2025.1.0", nil
+	}
+	if len(args) >= 2 && args[0] == "is-active" {
+		return "active", nil
+	}
+	if len(args) >= 2 && args[0] == "is-enabled" {
+		return "enabled", nil
+	}
+	return "ok", nil
+}
+
+func (r *fakeTunnelRunner) FileExists(path string) bool {
+	if strings.Contains(path, "cloudflared.service") {
+		return r.installed
+	}
+	return false
+}
+
+func TestCFTunnelServiceSetupAndNormalization(t *testing.T) {
+	db, cfg, _ := setupTestEnv(t)
+	if _, err := database.Seed(db, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	tunSvc := service.NewCFTunnelService(db, cfg)
+	runner := &fakeTunnelRunner{installed: true}
+	tunSvc.SetRunner(runner)
+
+	st := tunSvc.GetStatus(context.Background())
+	if !st.Installed || !st.Active || st.RecommendedService != "http://127.0.0.1:8082" {
+		t.Fatalf("unexpected CFTunnelStatus: %+v", st)
+	}
+
+	res, err := tunSvc.SetupTunnel(context.Background(), dto.CFTunnelSetupRequest{
+		TunnelToken: "sudo cloudflared service install eyJhIjoiYWJjMTIzIn0=",
+	})
+	if err != nil || !res.Success {
+		t.Fatalf("SetupTunnel failed: %+v err=%v", res, err)
+	}
+
+	foundInstall := false
+	for _, c := range runner.calls {
+		if len(c) == 4 && c[1] == "service" && c[2] == "install" && c[3] == "eyJhIjoiYWJjMTIzIn0=" {
+			foundInstall = true
+		}
+	}
+	if !foundInstall {
+		t.Fatalf("expected stripped token passed to cloudflared service install, calls=%+v", runner.calls)
 	}
 }

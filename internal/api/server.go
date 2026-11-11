@@ -44,6 +44,7 @@ func NewServer(cfg *config.Config, db *gorm.DB, version string) *Server {
 	nginxGen := nginx.NewGenerator(cfg.Nginx.ConfigDir, cfg.Nginx.StreamDir)
 	nginxGen.SetDB(db)
 	nginxGen.SetSocketDir(cfg.Xray.SocketDir)
+	nginxGen.SetPanelListen(cfg.Server.Listen)
 	if cfg.Nginx.ReloadCmd != "" {
 		nginxGen.SetReloadCmd(cfg.Nginx.ReloadCmd)
 	}
@@ -58,6 +59,7 @@ func NewServer(cfg *config.Config, db *gorm.DB, version string) *Server {
 	sysSvc := service.NewSystemService(db, cfg, nginxGen)
 	dashSvc := service.NewDashboardService(db, sysSvc)
 	subSvc := service.NewSubscriptionService(db)
+	tunnelSvc := service.NewCFTunnelService(db, cfg)
 
 	failLimit := cfg.Auth.FailLimit
 	if failLimit <= 0 {
@@ -95,6 +97,7 @@ func NewServer(cfg *config.Config, db *gorm.DB, version string) *Server {
 			Domains:   domainSvc,
 			WireGuard: wgSvc,
 			System:    sysSvc,
+			Tunnels:   tunnelSvc,
 		},
 	}
 
@@ -196,9 +199,21 @@ func (s *Server) setupRoutes() {
 		apiV1.GET("/domains/scan-certs", s.v1Handler.ScanCerts)
 		apiV1.POST("/domains/scan-import", s.v1Handler.ScanImportCerts)
 		apiV1.POST("/domains/import-cert", s.v1Handler.ImportSingleCert)
+		apiV1.POST("/domains/upload-cert", s.v1Handler.UploadDomainCert)
+		apiV1.POST("/domains/issue-cert", s.v1Handler.IssueDomainCert)
 		apiV1.GET("/domains/:id", s.v1Handler.GetDomain)
 		apiV1.PUT("/domains/:id", s.v1Handler.UpdateDomain)
 		apiV1.DELETE("/domains/:id", s.v1Handler.DeleteDomain)
+
+		// Subscription & API Nginx reverse proxy and Cloudflare Tunnel
+		apiV1.POST("/subscription/nginx", s.v1Handler.ApplySubscriptionNginx)
+		apiV1.DELETE("/subscription/nginx", s.v1Handler.DisableSubscriptionNginx)
+		apiV1.POST("/panel/nginx", s.v1Handler.ApplyAPINginx)
+		apiV1.DELETE("/panel/nginx", s.v1Handler.DisableAPINginx)
+		apiV1.GET("/tunnels/cf/status", s.v1Handler.GetCFTunnelStatus)
+		apiV1.POST("/tunnels/cf/install", s.v1Handler.InstallCFTunnel)
+		apiV1.POST("/tunnels/cf/setup", s.v1Handler.SetupCFTunnel)
+		apiV1.POST("/tunnels/cf/service/:action", s.v1Handler.CFTunnelServiceAction)
 
 		// WireGuard
 		apiV1.GET("/wireguard/status", s.v1Handler.GetWGStatus)

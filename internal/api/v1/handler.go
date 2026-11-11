@@ -24,6 +24,7 @@ type Handler struct {
 	Domains   *service.DomainService
 	WireGuard *service.WireGuardService
 	System    *service.SystemService
+	Tunnels   *service.CFTunnelService
 }
 
 func respondOK(c *gin.Context, data interface{}) {
@@ -582,6 +583,36 @@ func (h *Handler) ImportSingleCert(c *gin.Context) {
 	respondOK(c, res)
 }
 
+// UploadDomainCert handles POST /api/v1/domains/upload-cert.
+func (h *Handler) UploadDomainCert(c *gin.Context) {
+	var req dto.UploadCertRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, dto.ErrValidation, "Invalid request: "+err.Error(), nil)
+		return
+	}
+	res, err := h.Domains.UploadCertificate(req)
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// IssueDomainCert handles POST /api/v1/domains/issue-cert.
+func (h *Handler) IssueDomainCert(c *gin.Context) {
+	var req dto.IssueCertRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, dto.ErrValidation, "Invalid request: "+err.Error(), nil)
+		return
+	}
+	res, err := h.Domains.IssueCertificate(c.Request.Context(), req)
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
 // GetWGStatus handles GET /api/v1/wireguard/status.
 func (h *Handler) GetWGStatus(c *gin.Context) {
 	res, err := h.WireGuard.GetStatus()
@@ -820,6 +851,86 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 // RestartPanel handles POST /api/v1/panel/restart.
 func (h *Handler) RestartPanel(c *gin.Context) {
 	respondOK(c, h.System.RestartPanel())
+}
+
+// ApplySubscriptionNginx handles POST /api/v1/subscription/nginx.
+func (h *Handler) ApplySubscriptionNginx(c *gin.Context) {
+	res, err := h.System.ApplySubscriptionNginx()
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// DisableSubscriptionNginx handles DELETE /api/v1/subscription/nginx.
+func (h *Handler) DisableSubscriptionNginx(c *gin.Context) {
+	res, err := h.System.DisableSubscriptionNginx()
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// ApplyAPINginx handles POST /api/v1/panel/nginx.
+func (h *Handler) ApplyAPINginx(c *gin.Context) {
+	res, err := h.System.ApplyAPINginx()
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// DisableAPINginx handles DELETE /api/v1/panel/nginx.
+func (h *Handler) DisableAPINginx(c *gin.Context) {
+	res, err := h.System.DisableAPINginx()
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// GetCFTunnelStatus handles GET /api/v1/tunnels/cf/status.
+func (h *Handler) GetCFTunnelStatus(c *gin.Context) {
+	respondOK(c, h.Tunnels.GetStatus(c.Request.Context()))
+}
+
+// InstallCFTunnel handles POST /api/v1/tunnels/cf/install.
+func (h *Handler) InstallCFTunnel(c *gin.Context) {
+	res, err := h.Tunnels.InstallBinary(c.Request.Context())
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// SetupCFTunnel handles POST /api/v1/tunnels/cf/setup.
+func (h *Handler) SetupCFTunnel(c *gin.Context) {
+	var req dto.CFTunnelSetupRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, dto.ErrValidation, "Invalid request: "+err.Error(), nil)
+		return
+	}
+	res, err := h.Tunnels.SetupTunnel(c.Request.Context(), req)
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// CFTunnelServiceAction handles POST /api/v1/tunnels/cf/service/:action.
+func (h *Handler) CFTunnelServiceAction(c *gin.Context) {
+	res, err := h.Tunnels.ServiceAction(c.Request.Context(), c.Param("action"))
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
 }
 
 // GetLogs handles GET /api/v1/logs.

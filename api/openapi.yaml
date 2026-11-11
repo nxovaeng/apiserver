@@ -910,6 +910,54 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /api/v1/domains/upload-cert:
+    post:
+      tags: [Domains]
+      summary: Upload PEM certificate and private key directly to server and register/update domain
+      operationId: uploadDomainCertificate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadCertRequest"
+      responses:
+        "200":
+          description: Uploaded certificate domain record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/domains/issue-cert:
+    post:
+      tags: [Domains]
+      summary: Issue ACME TLS certificate via DNS-01 API (Cloudflare or LuaDNS)
+      operationId: issueDomainCertificate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueCertRequest"
+      responses:
+        "200":
+          description: Issued certificate domain record and output
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssueCertEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/SystemCommandFailed"
+
   /api/v1/domains/{id}:
     get:
       tags: [Domains]
@@ -1342,6 +1390,143 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PanelRestartEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/panel/nginx:
+    post:
+      tags: [Xray & System]
+      summary: Generate and enable Nginx HTTPS/CDN reverse proxy config for control-plane /api/v1
+      operationId: applyAPINginx
+      responses:
+        "200":
+          description: API Nginx reverse proxy applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APINginxEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    delete:
+      tags: [Xray & System]
+      summary: Disable and clean up Nginx reverse proxy for control-plane /api/v1
+      operationId: disableAPINginx
+      responses:
+        "200":
+          description: API Nginx reverse proxy disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APINginxEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/subscription/nginx:
+    post:
+      tags: [Xray & System]
+      summary: Generate and enable Nginx HTTPS reverse proxy for public subscription endpoint
+      operationId: applySubscriptionNginx
+      responses:
+        "200":
+          description: Subscription Nginx proxy applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionNginxEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    delete:
+      tags: [Xray & System]
+      summary: Disable and clean up standalone Nginx subscription reverse proxy
+      operationId: disableSubscriptionNginx
+      responses:
+        "200":
+          description: Subscription Nginx proxy disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionNginxEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/tunnels/cf/status:
+    get:
+      tags: [Xray & System]
+      summary: Get Cloudflare Tunnel (cloudflared) installation and service status
+      operationId: getCFTunnelStatus
+      responses:
+        "200":
+          description: Cloudflare Tunnel status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CFTunnelStatusEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/tunnels/cf/install:
+    post:
+      tags: [Xray & System]
+      summary: Download and install cloudflared binary on server
+      operationId: installCFTunnel
+      responses:
+        "200":
+          description: Installation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CFTunnelInstallEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/tunnels/cf/setup:
+    post:
+      tags: [Xray & System]
+      summary: Configure and start cloudflared systemd service using Cloudflare Tunnel token
+      operationId: setupCFTunnel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CFTunnelSetupRequest"
+      responses:
+        "200":
+          description: Tunnel configured and started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CFTunnelActionEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/tunnels/cf/service/{action}:
+    post:
+      tags: [Xray & System]
+      summary: Control cloudflared service (start, stop, restart, uninstall)
+      operationId: cfTunnelServiceAction
+      parameters:
+        - name: action
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [start, stop, restart, uninstall]
+      responses:
+        "200":
+          description: Service action result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CFTunnelActionEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -3173,6 +3358,82 @@ components:
         key_path:
           type: string
 
+    UploadCertRequest:
+      type: object
+      required: [domain, cert_pem, key_pem]
+      properties:
+        domain:
+          type: string
+        type:
+          type: string
+          enum: [direct, cdn]
+        cert_pem:
+          type: string
+        key_pem:
+          type: string
+        enabled:
+          type: boolean
+          nullable: true
+
+    IssueCertRequest:
+      type: object
+      required: [domain, provider]
+      properties:
+        domain:
+          type: string
+        include_wildcard:
+          type: boolean
+        type:
+          type: string
+          enum: [direct, cdn]
+        provider:
+          type: string
+          enum: [cf, luadns]
+        cf_token:
+          type: string
+        cf_key:
+          type: string
+        cf_email:
+          type: string
+        cf_zone_id:
+          type: string
+        lua_key:
+          type: string
+        lua_email:
+          type: string
+        ca_server:
+          type: string
+          enum: [letsencrypt, zerossl]
+        email:
+          type: string
+        force:
+          type: boolean
+
+    IssueCertResponse:
+      type: object
+      required: [domain, provider, ca_server, reused_existing, output]
+      properties:
+        domain:
+          $ref: "#/components/schemas/DomainDTO"
+        provider:
+          type: string
+        ca_server:
+          type: string
+        reused_existing:
+          type: boolean
+        output:
+          type: string
+
+    IssueCertEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/IssueCertResponse"
+
     # ===== WireGuard =====
     WGServiceStatus:
       type: object
@@ -3629,6 +3890,9 @@ components:
         - panel_title
         - sub_domain
         - sub_path
+        - sub_nginx_enabled
+        - api_domain
+        - api_nginx_enabled
         - server_public_host
         - xray_log_level
         - enable_traffic_stats
@@ -3646,6 +3910,12 @@ components:
           type: string
         sub_path:
           type: string
+        sub_nginx_enabled:
+          type: boolean
+        api_domain:
+          type: string
+        api_nginx_enabled:
+          type: boolean
         server_public_host:
           type: string
         xray_log_level:
@@ -3690,6 +3960,15 @@ components:
         sub_path:
           type: string
           nullable: true
+        sub_nginx_enabled:
+          type: boolean
+          nullable: true
+        api_domain:
+          type: string
+          nullable: true
+        api_nginx_enabled:
+          type: boolean
+          nullable: true
         server_public_host:
           type: string
           nullable: true
@@ -3716,6 +3995,171 @@ components:
           allOf:
             - $ref: "#/components/schemas/DirectDomainStrategy"
           nullable: true
+
+    SubscriptionNginxResponse:
+      type: object
+      required: [enabled, domain, sub_path, config_path, matched_cert_domain, reloaded, message]
+      properties:
+        enabled:
+          type: boolean
+        domain:
+          type: string
+        sub_path:
+          type: string
+        config_path:
+          type: string
+        matched_cert_domain:
+          type: string
+        reloaded:
+          type: boolean
+        message:
+          type: string
+
+    SubscriptionNginxEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/SubscriptionNginxResponse"
+
+    APINginxResponse:
+      type: object
+      required: [enabled, domain, direct_url, config_path, matched_cert_domain, reloaded, message]
+      properties:
+        enabled:
+          type: boolean
+        domain:
+          type: string
+        direct_url:
+          type: string
+        config_path:
+          type: string
+        matched_cert_domain:
+          type: string
+        reloaded:
+          type: boolean
+        message:
+          type: string
+
+    APINginxEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/APINginxResponse"
+
+    CFTunnelStatus:
+      type: object
+      required:
+        - is_linux
+        - installed
+        - binary_path
+        - version
+        - service_installed
+        - active
+        - enabled
+        - status
+        - panel_listen
+        - sub_domain
+        - sub_path
+        - recommended_service
+        - recommended_path_rule
+      properties:
+        is_linux:
+          type: boolean
+        installed:
+          type: boolean
+        binary_path:
+          type: string
+        version:
+          type: string
+        service_installed:
+          type: boolean
+        active:
+          type: boolean
+        enabled:
+          type: boolean
+        status:
+          type: string
+        panel_listen:
+          type: string
+        sub_domain:
+          type: string
+        sub_path:
+          type: string
+        recommended_service:
+          type: string
+        recommended_path_rule:
+          type: string
+
+    CFTunnelStatusEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/CFTunnelStatus"
+
+    CFTunnelSetupRequest:
+      type: object
+      required: [tunnel_token]
+      properties:
+        tunnel_token:
+          type: string
+
+    CFTunnelInstallResponse:
+      type: object
+      required: [installed, binary_path, version, message]
+      properties:
+        installed:
+          type: boolean
+        binary_path:
+          type: string
+        version:
+          type: string
+        message:
+          type: string
+
+    CFTunnelInstallEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/CFTunnelInstallResponse"
+
+    CFTunnelActionResponse:
+      type: object
+      required: [action, success, status, message]
+      properties:
+        action:
+          type: string
+        success:
+          type: boolean
+        status:
+          $ref: "#/components/schemas/CFTunnelStatus"
+        message:
+          type: string
+
+    CFTunnelActionEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/CFTunnelActionResponse"
 
     PanelRestartResponse:
       type: object

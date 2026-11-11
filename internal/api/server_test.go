@@ -2,13 +2,21 @@ package api_test
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"xray-panel-server/internal/api"
 	"xray-panel-server/internal/config"
@@ -289,5 +297,77 @@ func TestEndToEndRESTAndDynamicSubscription(t *testing.T) {
 	rec = doRequest(t, h, http.MethodGet, "/vip-feed/"+user.SubPath, "", nil, subIP)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 on 31st subscription request within 1m, got %d", rec.Code)
+	}
+}
+
+func TestCertUploadSubscriptionNginxAndTunnelRoutes(t *testing.T) {
+	srv, token, _ := setupTestServer(t)
+	h := srv.Handler()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(10),
+		Subject:      pkix.Name{CommonName: "sub-api.example.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(30 * 24 * time.Hour),
+		DNSNames:     []string{"sub-api.example.com"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, _ := x509.MarshalECPrivateKey(priv)
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
+
+	// Upload cert
+	rec := doRequest(t, h, http.MethodPost, "/api/v1/domains/upload-cert", token, dto.UploadCertRequest{
+		Domain:  "sub-api.example.com",
+		Type:    "direct",
+		CertPEM: certPEM,
+		KeyPEM:  keyPEM,
+	}, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"has_cert":true`) {
+		t.Fatalf("POST /api/v1/domains/upload-cert failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Set sub_domain & enable subscription nginx proxy
+	subDom := "sub-api.example.com"
+	rec = doRequest(t, h, http.MethodPut, "/api/v1/settings", token, dto.UpdateSettingsRequest{SubDomain: &subDom}, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/v1/settings failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doRequest(t, h, http.MethodPost, "/api/v1/subscription/nginx", token, nil, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"matched_cert_domain":"sub-api.example.com"`) {
+		t.Fatalf("POST /api/v1/subscription/nginx failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doRequest(t, h, http.MethodDelete, "/api/v1/subscription/nginx", token, nil, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"enabled":false`) {
+		t.Fatalf("DELETE /api/v1/subscription/nginx failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// API Nginx reverse proxy routes
+	apiDom := "sub-api.example.com"
+	rec = doRequest(t, h, http.MethodPut, "/api/v1/settings", token, dto.UpdateSettingsRequest{APIDomain: &apiDom}, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/v1/settings api_domain failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doRequest(t, h, http.MethodPost, "/api/v1/panel/nginx", token, nil, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"direct_url":"https://sub-api.example.com"`) {
+		t.Fatalf("POST /api/v1/panel/nginx failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doRequest(t, h, http.MethodDelete, "/api/v1/panel/nginx", token, nil, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"enabled":false`) {
+		t.Fatalf("DELETE /api/v1/panel/nginx failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doRequest(t, h, http.MethodGet, "/api/v1/tunnels/cf/status", token, nil, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"recommended_path_rule":"/d/*"`) {
+		t.Fatalf("GET /api/v1/tunnels/cf/status unexpected: %d %s", rec.Code, rec.Body.String())
 	}
 }

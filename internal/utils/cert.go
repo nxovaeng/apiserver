@@ -22,10 +22,14 @@ func ParseCertificateDetails(certPath string) (issuer string, expiry time.Time, 
 	if err != nil {
 		return
 	}
+	return ParseCertificateDetailsFromBytes(data, certPath)
+}
 
+// ParseCertificateDetailsFromBytes parses detailed certificate info from raw PEM bytes.
+func ParseCertificateDetailsFromBytes(data []byte, sourceLabel string) (issuer string, expiry time.Time, sans []string, isWildcard bool, err error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
-		err = fmt.Errorf("failed to decode PEM block from %s", certPath)
+		err = fmt.Errorf("failed to decode PEM block from %s", sourceLabel)
 		return
 	}
 

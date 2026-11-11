@@ -232,6 +232,7 @@ func cmdNginx(args []string) {
 		ng := nginx.NewGenerator(cfg.Nginx.ConfigDir, cfg.Nginx.StreamDir)
 		ng.SetDB(db)
 		ng.SetSocketDir(cfg.Xray.SocketDir)
+		ng.SetPanelListen(cfg.Server.Listen)
 
 		var inbounds []models.Inbound
 		if err := db.Preload("Domain").Where("enabled = ?", true).Find(&inbounds).Error; err != nil {

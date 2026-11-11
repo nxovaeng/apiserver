@@ -56,6 +56,9 @@ func (s *SystemService) GetSettings() (*dto.SettingsDTO, error) {
 		PanelTitle:              get("panel_title", "Xray Panel"),
 		SubDomain:               get("sub_domain", ""),
 		SubPath:                 models.NormalizeSubPath(get("sub_path", "/d")),
+		SubNginxEnabled:         get("sub_nginx_enabled", "false") == "true",
+		APIDomain:               get("api_domain", ""),
+		APINginxEnabled:         get("api_nginx_enabled", "false") == "true",
 		ServerPublicHost:        get("server_public_host", ""),
 		XrayLogLevel:            get("xray_log_level", "warning"),
 		EnableTrafficStats:      get("enable_traffic_stats", "true") != "false",
@@ -84,6 +87,15 @@ func (s *SystemService) UpdateSettings(req dto.UpdateSettingsRequest) (*dto.Sett
 			return nil, NewValidationError("订阅路径前缀不能与 /api 冲突")
 		}
 		updates["sub_path"] = normalized
+	}
+	if req.SubNginxEnabled != nil {
+		updates["sub_nginx_enabled"] = strconv.FormatBool(*req.SubNginxEnabled)
+	}
+	if req.APIDomain != nil {
+		updates["api_domain"] = cleanHost(*req.APIDomain)
+	}
+	if req.APINginxEnabled != nil {
+		updates["api_nginx_enabled"] = strconv.FormatBool(*req.APINginxEnabled)
 	}
 	if req.ServerPublicHost != nil {
 		updates["server_public_host"] = cleanHost(*req.ServerPublicHost)
@@ -139,7 +151,270 @@ func (s *SystemService) UpdateSettings(req dto.UpdateSettingsRequest) (*dto.Sett
 		}
 	}
 
+	nginxNeedsSync := req.SubNginxEnabled != nil || req.APINginxEnabled != nil ||
+		((req.SubDomain != nil || req.SubPath != nil) && models.GetSubNginxEnabled(s.db)) ||
+		(req.APIDomain != nil && models.GetAPINginxEnabled(s.db))
+	if s.nginxGen != nil && nginxNeedsSync {
+		if _, err := syncManagedNginx(s.db, s.nginxGen, true, ""); err != nil {
+			applogger.Warn("Failed to sync endpoint Nginx after settings update: %v", err)
+		}
+	}
+
 	return s.GetSettings()
+}
+
+// ApplySubscriptionNginx enables and writes Nginx HTTPS reverse proxy config for sub_domain/sub_path.
+func (s *SystemService) ApplySubscriptionNginx() (*dto.SubscriptionNginxResponse, error) {
+	subDomain := models.GetSubDomain(s.db)
+	if subDomain == "" {
+		return nil, NewValidationError("请先填写并保存订阅域名 (sub_domain)")
+	}
+	subPath := models.GetSubPath(s.db)
+	if s.nginxGen == nil {
+		return nil, NewInternalError("Nginx generator not configured", nil)
+	}
+
+	if err := upsertSettingKV(s.db, "sub_nginx_enabled", "true"); err != nil {
+		return nil, err
+	}
+
+	info, err := syncManagedNginx(s.db, s.nginxGen, true, "sub")
+	if err != nil {
+		_ = upsertSettingKV(s.db, "sub_nginx_enabled", "false")
+		return nil, err
+	}
+
+	return &dto.SubscriptionNginxResponse{
+		Enabled:           true,
+		Domain:            subDomain,
+		SubPath:           subPath,
+		ConfigPath:        info.SubConfigPath,
+		MatchedCertDomain: info.SubMatchedCert,
+		Reloaded:          true,
+		Message:           "订阅域名 Nginx 反代配置已生成并生效（仅放行 " + subPath + "/ 路径）",
+	}, nil
+}
+
+// DisableSubscriptionNginx removes standalone subscription Nginx config and re-syncs remaining configs.
+func (s *SystemService) DisableSubscriptionNginx() (*dto.SubscriptionNginxResponse, error) {
+	if err := upsertSettingKV(s.db, "sub_nginx_enabled", "false"); err != nil {
+		return nil, err
+	}
+	if s.nginxGen != nil {
+		if _, err := syncManagedNginx(s.db, s.nginxGen, true, ""); err != nil {
+			return nil, NewSystemCommandError("清理订阅 Nginx 配置失败: "+err.Error(), err)
+		}
+	}
+	return &dto.SubscriptionNginxResponse{
+		Enabled:  false,
+		Domain:   models.GetSubDomain(s.db),
+		SubPath:  models.GetSubPath(s.db),
+		Reloaded: true,
+		Message:  "已停用订阅 Nginx 反代",
+	}, nil
+}
+
+// ApplyAPINginx enables and writes Nginx HTTPS reverse proxy config for api_domain -> /api/v1/ (HTTPS/CDN ready).
+func (s *SystemService) ApplyAPINginx() (*dto.APINginxResponse, error) {
+	apiDomain := models.GetAPIDomain(s.db)
+	if apiDomain == "" {
+		return nil, NewValidationError("请先填写并保存 API 域名 (api_domain)")
+	}
+	if s.nginxGen == nil {
+		return nil, NewInternalError("Nginx generator not configured", nil)
+	}
+
+	if err := upsertSettingKV(s.db, "api_nginx_enabled", "true"); err != nil {
+		return nil, err
+	}
+
+	info, err := syncManagedNginx(s.db, s.nginxGen, true, "api")
+	if err != nil {
+		_ = upsertSettingKV(s.db, "api_nginx_enabled", "false")
+		return nil, err
+	}
+
+	return &dto.APINginxResponse{
+		Enabled:           true,
+		Domain:            apiDomain,
+		DirectURL:         "https://" + apiDomain,
+		ConfigPath:        info.APIConfigPath,
+		MatchedCertDomain: info.APIMatchedCert,
+		Reloaded:          true,
+		Message:           "API 域名 Nginx HTTPS 反代已生效（支持直连 HTTPS 与 Cloudflare CDN，SSE 缓冲已关闭）",
+	}, nil
+}
+
+// DisableAPINginx disables API Nginx reverse proxy and re-syncs remaining managed configs.
+func (s *SystemService) DisableAPINginx() (*dto.APINginxResponse, error) {
+	if err := upsertSettingKV(s.db, "api_nginx_enabled", "false"); err != nil {
+		return nil, err
+	}
+	if s.nginxGen != nil {
+		if _, err := syncManagedNginx(s.db, s.nginxGen, true, ""); err != nil {
+			return nil, NewSystemCommandError("清理 API Nginx 配置失败: "+err.Error(), err)
+		}
+	}
+	apiDomain := models.GetAPIDomain(s.db)
+	directURL := ""
+	if apiDomain != "" {
+		directURL = "https://" + apiDomain
+	}
+	return &dto.APINginxResponse{
+		Enabled:   false,
+		Domain:    apiDomain,
+		DirectURL: directURL,
+		Reloaded:  true,
+		Message:   "已停用 API Nginx 反代",
+	}, nil
+}
+
+func upsertSettingKV(db *gorm.DB, key, val string) error {
+	var setting models.Setting
+	if err := db.Where("key = ?", key).First(&setting).Error; err == nil {
+		setting.Value = val
+		if err := db.Save(&setting).Error; err != nil {
+			return NewInternalError("Failed to update setting "+key, err)
+		}
+		return nil
+	}
+	if err := db.Create(&models.Setting{Key: key, Value: val}).Error; err != nil {
+		return NewInternalError("Failed to create setting "+key, err)
+	}
+	return nil
+}
+
+type managedNginxSyncInfo struct {
+	SubConfigPath  string
+	SubMatchedCert string
+	APIConfigPath  string
+	APIMatchedCert string
+}
+
+func syncManagedNginx(db *gorm.DB, nginxGen *nginx.ConfigGenerator, reload bool, strictTarget string) (managedNginxSyncInfo, error) {
+	var info managedNginxSyncInfo
+	if nginxGen == nil {
+		return info, nil
+	}
+
+	var inbounds []models.Inbound
+	if err := db.Preload("Domain").Where("enabled = ?", true).Find(&inbounds).Error; err != nil {
+		return info, NewInternalError("Failed to load inbounds for Nginx sync", err)
+	}
+	if err := nginxGen.GenerateHTTPConfig(inbounds); err != nil {
+		return info, NewSystemCommandError("Failed to generate Nginx HTTP config: "+err.Error(), err)
+	}
+
+	standalone := make(map[string]nginx.EndpointProxySpec)
+	configDir := nginxGen.ConfigDir()
+	if configDir == "" {
+		configDir = "/etc/nginx/conf.d"
+	}
+
+	resolveStandalone := func(targetKey, domain, label string) (*models.Domain, bool, error) {
+		if hasInboundForDomain(inbounds, domain) {
+			return nil, true, nil
+		}
+		certDom, err := findMatchingDomainCert(db, domain)
+		if err != nil {
+			return nil, false, err
+		}
+		if certDom == nil {
+			msg := "未找到匹配" + label + " " + domain + " 的有效 TLS 证书，请先在「域名证书」上传或申请证书"
+			if strictTarget == targetKey {
+				return nil, false, NewValidationError(msg)
+			}
+			applogger.Warn("%s", msg)
+			return nil, false, nil
+		}
+		return certDom, false, nil
+	}
+
+	subDomain := models.GetSubDomain(db)
+	subPath := models.GetSubPath(db)
+	if models.GetSubNginxEnabled(db) && subDomain != "" {
+		certDom, shared, err := resolveStandalone("sub", subDomain, "订阅域名")
+		if err != nil {
+			return info, err
+		}
+		if shared {
+			info.SubMatchedCert = subDomain
+			info.SubConfigPath = filepath.Join(configDir, subDomain+".conf")
+		} else if certDom != nil {
+			info.SubMatchedCert = certDom.Domain
+			k := strings.ToLower(subDomain)
+			spec := standalone[k]
+			spec.Domain = subDomain
+			spec.CertPath = certDom.CertPath
+			spec.KeyPath = certDom.KeyPath
+			spec.SubPath = subPath
+			standalone[k] = spec
+		}
+	}
+
+	apiDomain := models.GetAPIDomain(db)
+	if models.GetAPINginxEnabled(db) && apiDomain != "" {
+		certDom, shared, err := resolveStandalone("api", apiDomain, "API 域名")
+		if err != nil {
+			return info, err
+		}
+		if shared {
+			info.APIMatchedCert = apiDomain
+			info.APIConfigPath = filepath.Join(configDir, apiDomain+".conf")
+		} else if certDom != nil {
+			info.APIMatchedCert = certDom.Domain
+			k := strings.ToLower(apiDomain)
+			spec := standalone[k]
+			spec.Domain = apiDomain
+			spec.CertPath = certDom.CertPath
+			spec.KeyPath = certDom.KeyPath
+			spec.ExposeAPI = true
+			standalone[k] = spec
+		}
+	}
+
+	written, err := nginxGen.SyncEndpointProxies(standalone)
+	if err != nil {
+		return info, NewSystemCommandError("生成端点 Nginx 配置失败: "+err.Error(), err)
+	}
+	if subDomain != "" {
+		if p, ok := written[strings.ToLower(subDomain)]; ok {
+			info.SubConfigPath = p
+		}
+	}
+	if apiDomain != "" {
+		if p, ok := written[strings.ToLower(apiDomain)]; ok {
+			info.APIConfigPath = p
+		}
+	}
+
+	if err := nginxGen.TestConfig(); err != nil {
+		return info, NewSystemCommandError("Nginx 配置校验失败 (nginx -t): "+err.Error(), err)
+	}
+	if reload {
+		if err := nginxGen.Reload(); err != nil {
+			applogger.Warn("Failed to reload Nginx: %v", err)
+		} else {
+			applogger.Info("Nginx reloaded successfully")
+		}
+	}
+	return info, nil
+}
+
+func hasInboundForDomain(inbounds []models.Inbound, targetDomain string) bool {
+	for _, inb := range inbounds {
+		if inb.Domain == nil {
+			continue
+		}
+		effective := inb.Domain.Domain
+		if inb.ActualDomain != "" {
+			effective = inb.ActualDomain
+		}
+		if strings.EqualFold(effective, targetDomain) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *SystemService) GetXrayStatus() *dto.XrayStatusResponse {
@@ -270,10 +545,8 @@ func (s *SystemService) ApplyXrayConfig(hot bool) (*dto.XrayApplyResponse, error
 	}
 
 	if s.nginxGen != nil {
-		var inbounds []models.Inbound
-		s.db.Preload("Domain").Where("enabled = ?", true).Find(&inbounds)
-		if err := s.nginxGen.GenerateHTTPConfig(inbounds); err != nil {
-			return nil, NewSystemCommandError("Failed to generate Nginx HTTP config: "+err.Error(), err)
+		if _, syncErr := syncManagedNginx(s.db, s.nginxGen, false, ""); syncErr != nil {
+			return nil, syncErr
 		}
 	}
 

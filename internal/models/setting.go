@@ -29,6 +29,9 @@ func DefaultSettings() []Setting {
 		{Key: "panel_title", Value: "Xray Panel", Type: "string", Remark: "Panel title"},
 		{Key: "sub_domain", Value: "", Type: "string", Remark: "Subscription domain"},
 		{Key: "sub_path", Value: "/d", Type: "string", Remark: "Subscription URL path prefix"},
+		{Key: "sub_nginx_enabled", Value: "false", Type: "bool", Remark: "Expose subscription path via Nginx HTTPS reverse proxy"},
+		{Key: "api_domain", Value: "", Type: "string", Remark: "Control plane API domain for HTTPS/CDN direct access"},
+		{Key: "api_nginx_enabled", Value: "false", Type: "bool", Remark: "Expose /api/v1 via Nginx HTTPS reverse proxy"},
 		{Key: "server_public_host", Value: "", Type: "string", Remark: "Public server IP or domain for WireGuard endpoints and fallback subscriptions"},
 		{Key: "xray_log_level", Value: "warning", Type: "string", Remark: "Xray log level"},
 		{Key: "enable_traffic_stats", Value: "true", Type: "bool", Remark: "Enable traffic statistics"},
@@ -83,6 +86,21 @@ func GetSubPath(db *gorm.DB) string {
 // GetSubDomain returns the configured subscription domain.
 func GetSubDomain(db *gorm.DB) string {
 	return strings.TrimSpace(GetSettingValue(db, "sub_domain", ""))
+}
+
+// GetSubNginxEnabled returns whether standalone/shared Nginx subscription proxy is enabled.
+func GetSubNginxEnabled(db *gorm.DB) bool {
+	return GetSettingValue(db, "sub_nginx_enabled", "false") == "true"
+}
+
+// GetAPIDomain returns the configured API reverse proxy domain.
+func GetAPIDomain(db *gorm.DB) string {
+	return strings.TrimSpace(GetSettingValue(db, "api_domain", ""))
+}
+
+// GetAPINginxEnabled returns whether Nginx reverse proxy for /api/v1 is enabled.
+func GetAPINginxEnabled(db *gorm.DB) bool {
+	return GetSettingValue(db, "api_nginx_enabled", "false") == "true"
 }
 
 // GetServerPublicHost returns the configured server public host/IP.

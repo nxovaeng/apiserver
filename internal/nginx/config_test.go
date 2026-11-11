@@ -63,3 +63,58 @@ func TestInboundsConfigTmpl(t *testing.T) {
 		t.Errorf("expected grpc and ws locations in output")
 	}
 }
+
+func TestSubConfigTmplExposesOnlySubPath(t *testing.T) {
+	data := subTmplData{
+		Domain:      "sub.example.com",
+		CertPath:    "/etc/ssl/sub.crt",
+		KeyPath:     "/etc/ssl/sub.key",
+		SubPath:     "/d",
+		PanelTarget: "127.0.0.1:8082",
+	}
+
+	var buf bytes.Buffer
+	if err := subConfigTmpl.Execute(&buf, data); err != nil {
+		t.Fatalf("failed to execute subConfigTmpl: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "location ^~ /d/") {
+		t.Errorf("expected subscription prefix location in output: %s", out)
+	}
+	if !strings.Contains(out, "proxy_pass http://127.0.0.1:8082;") {
+		t.Errorf("expected loopback proxy_pass in output: %s", out)
+	}
+	if !strings.Contains(out, "return 404;") {
+		t.Errorf("expected default location / to return 404 so /api is never exposed")
+	}
+}
+
+func TestAPIConfigTmplExposesAPIWithSSEAndBlocksRoot(t *testing.T) {
+	data := subTmplData{
+		Domain:      "api.example.com",
+		CertPath:    "/etc/ssl/api.crt",
+		KeyPath:     "/etc/ssl/api.key",
+		ExposeAPI:   true,
+		PanelTarget: "127.0.0.1:8082",
+	}
+
+	var buf bytes.Buffer
+	if err := subConfigTmpl.Execute(&buf, data); err != nil {
+		t.Fatalf("failed to execute subConfigTmpl for API: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "location ^~ /api/v1/") {
+		t.Errorf("expected /api/v1/ location in output: %s", out)
+	}
+	if !strings.Contains(out, "proxy_buffering off;") || !strings.Contains(out, "proxy_read_timeout 1h;") {
+		t.Errorf("expected SSE proxy directives in API Nginx config: %s", out)
+	}
+	if strings.Contains(out, "location ^~ /d/") {
+		t.Errorf("did not expect subscription location when SubPath is empty: %s", out)
+	}
+	if !strings.Contains(out, "return 404;") {
+		t.Errorf("expected default root to return 404")
+	}
+}
