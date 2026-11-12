@@ -48,6 +48,7 @@ func setupTestEnv(t *testing.T) (*gorm.DB, *config.Config, string) {
 	cfg.Nginx.ReloadCmd = "true"
 	cfg.Nginx.TestCmd = "true"
 	cfg.Xray.ConfigPath = filepath.Join(tmpDir, "xray", "config.json")
+	cfg.Xray.TestConfigDir = filepath.Join(tmpDir, "xray-test")
 	cfg.Xray.AssetsPath = filepath.Join(tmpDir, "xray-assets")
 	cfg.Xray.SocketDir = tmpDir
 
@@ -418,9 +419,36 @@ func TestSettingsAndXrayApplyValidation(t *testing.T) {
 	}
 	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	// Fake xray binary script that succeeds on `-test`
+	t.Setenv("EXPECTED_XRAY_TEST_DIR", cfg.Xray.TestConfigDir)
+
+	// Fake xray binary script that validates invocation flags, .json extension,
+	// and isolation inside dedicated TestConfigDir (never inside live ConfigPath dir).
 	fakeXray := filepath.Join(tmpDir, "xray-ok.sh")
-	if err := os.WriteFile(fakeXray, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+	fakeXrayScript := `#!/bin/sh
+args="$*"
+case "$args" in
+  *"run"*"-test"*"-format json"*"-c "*) ;;
+  *) echo "unexpected xray args: $args" >&2; exit 1 ;;
+esac
+cfg=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-c" ]; then
+    cfg="$a"
+    break
+  fi
+  prev="$a"
+done
+if [ "$(dirname "$cfg")" != "$EXPECTED_XRAY_TEST_DIR" ]; then
+  echo "test config placed in wrong dir: $cfg (expected $EXPECTED_XRAY_TEST_DIR)" >&2
+  exit 1
+fi
+case "$cfg" in
+  *.json) exit 0 ;;
+  *) echo "temp config missing .json extension: $cfg" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(fakeXray, []byte(fakeXrayScript), 0755); err != nil {
 		t.Fatal(err)
 	}
 	cfg.Xray.BinaryPath = fakeXray
@@ -522,8 +550,11 @@ func TestSettingsAndXrayApplyValidation(t *testing.T) {
 	if !bytes.Equal(goodDisk, afterFailDisk) {
 		t.Fatalf("failed validation left an invalid config on disk")
 	}
-	if temps, _ := filepath.Glob(filepath.Join(filepath.Dir(cfg.Xray.ConfigPath), ".config.json.*")); len(temps) != 0 {
-		t.Fatalf("temp config files left behind: %v", temps)
+	if temps, _ := filepath.Glob(filepath.Join(cfg.Xray.TestConfigDir, "*")); len(temps) != 0 {
+		t.Fatalf("temp test config files left behind in TestConfigDir: %v", temps)
+	}
+	if stages, _ := filepath.Glob(filepath.Join(filepath.Dir(cfg.Xray.ConfigPath), ".stage-*")); len(stages) != 0 {
+		t.Fatalf("staging files left behind in live config dir: %v", stages)
 	}
 	cfg.Xray.BinaryPath = fakeXray
 

@@ -24,6 +24,7 @@ NC='\033[0m'
 INSTALL_DIR="/opt/xray-panel"
 DATA_DIR="${INSTALL_DIR}/data"
 LOGS_DIR="${INSTALL_DIR}/logs"
+XRAY_TEST_DIR="${INSTALL_DIR}/xray-test"
 CONFIG_FILE="${INSTALL_DIR}/config.yaml"
 BINARY_PATH="/usr/local/bin/xray-panel-server"
 SERVICE_NAME="xray-panel-server"
@@ -355,7 +356,7 @@ install_server_binary() {
 }
 
 write_config() {
-    mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${LOGS_DIR}"
+    mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${LOGS_DIR}" "${XRAY_TEST_DIR}"
     if [[ -f "${CONFIG_FILE}" ]]; then
         info "保留现有配置文件: ${CONFIG_FILE}"
         return
@@ -387,6 +388,7 @@ database:
 xray:
   binary_path: "${XRAY_BIN}"
   config_path: "${XRAY_CONF_DIR}/config.json"
+  test_config_dir: "${XRAY_TEST_DIR}"
   assets_path: "${XRAY_ASSETS_DIR}"
   api_port: 10085
   socket_dir: "/dev/shm"

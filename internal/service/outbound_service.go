@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -345,9 +344,10 @@ func (s *OutboundService) testOutboundViaXray(outbound models.Outbound) dto.Outb
 		return dto.OutboundTestResult{Success: false, Message: "Config build failed: " + err.Error(), Endpoint: endpoint}
 	}
 
-	tempPath := filepath.Join(os.TempDir(), fmt.Sprintf("xray_test_%s.json", outbound.ID))
-	if err := os.WriteFile(tempPath, configJSON, 0600); err != nil {
-		return dto.OutboundTestResult{Success: false, Message: "Write temp file failed: " + err.Error(), Endpoint: endpoint}
+	testConfigDir := resolveXrayTestConfigDir(s.cfg)
+	tempPath, err := writeTempXrayFile(testConfigDir, "outbound-*.json", configJSON, 0600)
+	if err != nil {
+		return dto.OutboundTestResult{Success: false, Message: "Write temp test config failed: " + err.Error(), Endpoint: endpoint}
 	}
 	defer os.Remove(tempPath)
 
@@ -355,7 +355,10 @@ func (s *OutboundService) testOutboundViaXray(outbound models.Outbound) dto.Outb
 	if s.cfg != nil && s.cfg.Xray.BinaryPath != "" {
 		binaryPath = s.cfg.Xray.BinaryPath
 	}
-	cmd := exec.Command(binaryPath, "run", "-c", tempPath)
+	cmd := exec.Command(binaryPath, "run", "-format", "json", "-c", tempPath)
+	if s.cfg != nil && strings.TrimSpace(s.cfg.Xray.AssetsPath) != "" {
+		cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+strings.TrimSpace(s.cfg.Xray.AssetsPath))
+	}
 	if err := cmd.Start(); err != nil {
 		return dto.OutboundTestResult{Success: false, Message: "Start Xray failed: " + err.Error(), Endpoint: endpoint}
 	}

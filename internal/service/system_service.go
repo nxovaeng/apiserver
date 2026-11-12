@@ -675,32 +675,19 @@ func (s *SystemService) ApplyXrayConfig() (*dto.XrayApplyResponse, error) {
 		}, nil
 	}
 
-	if dir := filepath.Dir(configPath); dir != "" {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, NewSystemCommandError("Failed to prepare Xray config directory: "+err.Error(), err)
-		}
-	}
-
-	// 先测后写：生成内容先写到同目录临时文件，对临时文件跑 xray -test，
-	// 通过后再 rename 覆盖正式文件。校验失败时磁盘上不留非法配置。
-	tmpFile, err := os.CreateTemp(filepath.Dir(configPath), ".config.json.*")
+	testConfigDir := resolveXrayTestConfigDir(s.cfg)
+	// 先测后写：测试配置写入独立的 test_config_dir（避免污染正式配置目录 /usr/local/etc/xray），
+	// 且以 .json 结尾 + 显式传 -format json；校验通过后再原子更新正式 config.json。
+	tmpPath, err := writeTempXrayFile(testConfigDir, "validate-*.json", configJSON, 0644)
 	if err != nil {
-		return nil, NewSystemCommandError("Failed to create temp Xray config: "+err.Error(), err)
+		return nil, NewSystemCommandError("Failed to prepare temp Xray test config: "+err.Error(), err)
 	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath) // 成功 rename 后此为 no-op
-	if _, err := tmpFile.Write(configJSON); err != nil {
-		tmpFile.Close()
-		return nil, NewSystemCommandError("Failed to write temp Xray config: "+err.Error(), err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return nil, NewSystemCommandError("Failed to write temp Xray config: "+err.Error(), err)
-	}
-	if err := os.Chmod(tmpPath, 0644); err != nil {
-		return nil, NewSystemCommandError("Failed to set temp Xray config permissions: "+err.Error(), err)
-	}
+	defer os.Remove(tmpPath)
 
-	cmd := exec.Command(binaryPath, "-test", "-c", tmpPath)
+	cmd := exec.Command(binaryPath, "run", "-test", "-format", "json", "-c", tmpPath)
+	if s.cfg != nil && strings.TrimSpace(s.cfg.Xray.AssetsPath) != "" {
+		cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+strings.TrimSpace(s.cfg.Xray.AssetsPath))
+	}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		errMsg := strings.TrimSpace(string(output))
 		if len(errMsg) > 500 {
@@ -711,16 +698,15 @@ func (s *SystemService) ApplyXrayConfig() (*dto.XrayApplyResponse, error) {
 		})
 	}
 
-	// 校验通过：旧文件留一份 config.json.bak，再原子 rename 覆盖正式文件。
+	// 校验通过：保留一份 config.json.bak，并在目标目录内通过非 .json 暂存文件原子替换正式 config.json，
+	// 避免跨文件系统 rename 失败 (EXDEV) 且不在生产目录留任何多余 .json 文件。
 	bakPath := configPath + ".bak"
-	if _, err := os.Stat(configPath); err == nil {
-		if err := os.Rename(configPath, bakPath); err != nil {
+	if oldData, readErr := os.ReadFile(configPath); readErr == nil {
+		if err := writeFileAtomically(bakPath, oldData, 0644); err != nil {
 			return nil, NewSystemCommandError("Failed to back up old Xray config: "+err.Error(), err)
 		}
 	}
-	if err := os.Rename(tmpPath, configPath); err != nil {
-		// 尽量把旧配置恢复回去。
-		_ = os.Rename(bakPath, configPath)
+	if err := writeFileAtomically(configPath, configJSON, 0644); err != nil {
 		return nil, NewSystemCommandError("Failed to write Xray config: "+err.Error(), err)
 	}
 
@@ -796,4 +782,50 @@ func (s *SystemService) GetLogs(serviceName string, lines int) (*dto.LogsRespons
 		Lines:   lines,
 		Content: content,
 	}, nil
+}
+
+func resolveXrayTestConfigDir(cfg *config.Config) string {
+	if cfg != nil && strings.TrimSpace(cfg.Xray.TestConfigDir) != "" {
+		return strings.TrimSpace(cfg.Xray.TestConfigDir)
+	}
+	return filepath.Join(os.TempDir(), "xray-panel-test")
+}
+
+func writeTempXrayFile(dir, pattern string, data []byte, perm os.FileMode) (string, error) {
+	if dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return "", err
+		}
+	}
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := os.Chmod(path, perm); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+func writeFileAtomically(targetPath string, data []byte, perm os.FileMode) error {
+	stagePath, err := writeTempXrayFile(filepath.Dir(targetPath), ".stage-*.tmp", data, perm)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(stagePath, targetPath); err != nil {
+		_ = os.Remove(stagePath)
+		return err
+	}
+	return nil
 }

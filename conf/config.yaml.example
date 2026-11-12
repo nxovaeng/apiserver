@@ -24,6 +24,7 @@ database:
 xray:
   binary_path: "/usr/local/bin/xray"
   config_path: "/usr/local/etc/xray/config.json"
+  test_config_dir: "/opt/xray-panel/xray-test"   # Xray 临时测试/预校验配置目录（与生产配置隔离）
   assets_path: "/usr/local/share/xray"   # geoip.dat / geosite.dat
   api_port: 10085
   socket_dir: "/dev/shm"     # UDS 目录，/dev/shm 性能更好

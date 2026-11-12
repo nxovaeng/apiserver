@@ -48,6 +48,7 @@ func setupTestServer(t *testing.T) (*api.Server, string, string) {
 	cfg.Nginx.ReloadCmd = "true"
 	cfg.Nginx.TestCmd = "true"
 	cfg.Xray.ConfigPath = filepath.Join(tmpDir, "xray", "config.json")
+	cfg.Xray.TestConfigDir = filepath.Join(tmpDir, "xray-test")
 	cfg.Xray.AssetsPath = filepath.Join(tmpDir, "xray-assets")
 	cfg.Xray.SocketDir = tmpDir
 

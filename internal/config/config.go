@@ -49,11 +49,12 @@ type DatabaseConfig struct {
 
 // XrayConfig holds Xray core settings.
 type XrayConfig struct {
-	BinaryPath string `yaml:"binary_path"`
-	ConfigPath string `yaml:"config_path"`
-	AssetsPath string `yaml:"assets_path"`
-	APIPort    int    `yaml:"api_port"`
-	SocketDir  string `yaml:"socket_dir"`
+	BinaryPath    string `yaml:"binary_path"`
+	ConfigPath    string `yaml:"config_path"`
+	TestConfigDir string `yaml:"test_config_dir"`
+	AssetsPath    string `yaml:"assets_path"`
+	APIPort       int    `yaml:"api_port"`
+	SocketDir     string `yaml:"socket_dir"`
 }
 
 // NginxConfig holds Nginx settings.
@@ -107,6 +108,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Xray.ConfigPath == "" {
 		c.Xray.ConfigPath = "/usr/local/etc/xray/config.json"
+	}
+	if c.Xray.TestConfigDir == "" {
+		c.Xray.TestConfigDir = "/opt/xray-panel/xray-test"
 	}
 	if c.Xray.AssetsPath == "" {
 		c.Xray.AssetsPath = "/usr/local/share/xray"
@@ -190,11 +194,12 @@ func Default() *Config {
 			Path: "/opt/xray-panel/data/panel.db",
 		},
 		Xray: XrayConfig{
-			BinaryPath: "/usr/local/bin/xray",
-			ConfigPath: "/usr/local/etc/xray/config.json",
-			AssetsPath: "/usr/local/share/xray",
-			APIPort:    10085,
-			SocketDir:  "/dev/shm",
+			BinaryPath:    "/usr/local/bin/xray",
+			ConfigPath:    "/usr/local/etc/xray/config.json",
+			TestConfigDir: "/opt/xray-panel/xray-test",
+			AssetsPath:    "/usr/local/share/xray",
+			APIPort:       10085,
+			SocketDir:     "/dev/shm",
 		},
 		Nginx: NginxConfig{
 			ConfigDir: "/etc/nginx/conf.d",
