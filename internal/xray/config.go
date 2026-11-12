@@ -76,6 +76,7 @@ type Generator struct {
 	logLevel             string
 	socketDir            string
 	directDomainStrategy string
+	cnIPFallback         string
 	enableTrafficStats   bool
 	enableSniffing       bool
 }
@@ -138,6 +139,14 @@ func (g *Generator) SetDirectDomainStrategy(strategy string) *Generator {
 		strategy = "UseIPv4"
 	}
 	g.directDomainStrategy = strategy
+	return g
+}
+
+// SetCNIPFallback names the fallback outbound for CN IPs not matched by a
+// user rule: an outbound tag (e.g. "proton"), "block", or "direct". Empty
+// disables the built-in geoip:cn catch-all rule.
+func (g *Generator) SetCNIPFallback(tag string) *Generator {
+	g.cnIPFallback = strings.TrimSpace(tag)
 	return g
 }
 

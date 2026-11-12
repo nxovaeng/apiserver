@@ -39,6 +39,7 @@ func DefaultSettings() []Setting {
 		{Key: "default_traffic_limit", Value: "0", Type: "int", Remark: "Default traffic limit in bytes (0=unlimited)"},
 		{Key: "default_expire_days", Value: "30", Type: "int", Remark: "Default expiry days for new users"},
 		{Key: "direct_domain_strategy", Value: "UseIPv4", Type: "string", Remark: "Domain strategy for direct outbound"},
+		{Key: "cn_ip_fallback", Value: "proton", Type: "string", Remark: "Fallback outbound for unmatched CN IPs: outbound tag (default proton), block, direct, or empty to disable"},
 		{Key: "monthly_net_baseline_sent", Value: "", Type: "int", Remark: "OS net bytes sent at start of current month"},
 		{Key: "monthly_net_baseline_recv", Value: "", Type: "int", Remark: "OS net bytes received at start of current month"},
 		{Key: "monthly_net_baseline_month", Value: "", Type: "string", Remark: "Month of the current baseline (YYYY-MM)"},
@@ -60,6 +61,24 @@ func GetSettingValue(db *gorm.DB, key, fallback string) string {
 // GetDirectDomainStrategy returns the domain strategy for direct outbound.
 func GetDirectDomainStrategy(db *gorm.DB) string {
 	return GetSettingValue(db, "direct_domain_strategy", "UseIPv4")
+}
+
+// GetCNIPFallback returns the fallback outbound for CN IPs not matched by
+// a user rule: an outbound tag (default "proton", normally a socks5 outbound
+// pointing at wireproxy), "block" or "direct" (built-in outbounds), or empty
+// to disable the built-in geoip:cn catch-all rule. A named outbound only
+// takes effect when an enabled outbound with that tag exists. An absent row
+// falls back to "proton" (the seeded default); an explicitly empty value
+// disables the rule.
+func GetCNIPFallback(db *gorm.DB) string {
+	if db == nil {
+		return ""
+	}
+	var setting Setting
+	if err := db.First(&setting, "key = ?", "cn_ip_fallback").Error; err != nil {
+		return "proton"
+	}
+	return strings.TrimSpace(setting.Value)
 }
 
 // NormalizeSubPath ensures sub_path starts with "/" and has no trailing "/" (except default "/d").

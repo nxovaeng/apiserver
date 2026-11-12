@@ -688,6 +688,7 @@ type SettingsDTO struct {
 	DefaultTrafficLimit     int64  `json:"default_traffic_limit"`
 	DefaultExpireDays       int    `json:"default_expire_days"`
 	DirectDomainStrategy    string `json:"direct_domain_strategy"`
+	CNIPFallback            string `json:"cn_ip_fallback"`
 	MonthlyNetBaselineSent  string `json:"monthly_net_baseline_sent"`
 	MonthlyNetBaselineRecv  string `json:"monthly_net_baseline_recv"`
 	MonthlyNetBaselineMonth string `json:"monthly_net_baseline_month"`
@@ -707,6 +708,7 @@ type UpdateSettingsRequest struct {
 	DefaultTrafficLimit  *int64  `json:"default_traffic_limit"`
 	DefaultExpireDays    *int    `json:"default_expire_days"`
 	DirectDomainStrategy *string `json:"direct_domain_strategy"`
+	CNIPFallback         *string `json:"cn_ip_fallback"`
 }
 
 type SubscriptionNginxResponse struct {

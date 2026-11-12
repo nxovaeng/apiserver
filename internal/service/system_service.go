@@ -68,6 +68,7 @@ func (s *SystemService) GetSettings() (*dto.SettingsDTO, error) {
 		DefaultTrafficLimit:     trafficLimit,
 		DefaultExpireDays:       expireDays,
 		DirectDomainStrategy:    get("direct_domain_strategy", "UseIPv4"),
+		CNIPFallback:            get("cn_ip_fallback", "proton"),
 		MonthlyNetBaselineSent:  get("monthly_net_baseline_sent", ""),
 		MonthlyNetBaselineRecv:  get("monthly_net_baseline_recv", ""),
 		MonthlyNetBaselineMonth: get("monthly_net_baseline_month", ""),
@@ -137,6 +138,10 @@ func (s *SystemService) UpdateSettings(req dto.UpdateSettingsRequest) (*dto.Sett
 		default:
 			return nil, NewValidationError("无效的 direct_domain_strategy，允许值: AsIs, UseIP, UseIPv4, UseIPv6")
 		}
+	}
+	if req.CNIPFallback != nil {
+		// Empty disables the built-in geoip:cn → Proton catch-all rule.
+		updates["cn_ip_fallback"] = strings.TrimSpace(*req.CNIPFallback)
 	}
 
 	for key, val := range updates {
@@ -484,7 +489,8 @@ func (s *SystemService) GenerateXrayConfig() (*xray.Config, []byte, error) {
 		SetLogLevel(models.GetXrayLogLevel(s.db)).
 		SetEnableTrafficStats(models.GetEnableTrafficStats(s.db)).
 		SetEnableSniffing(models.GetEnableSniffing(s.db)).
-		SetDirectDomainStrategy(models.GetDirectDomainStrategy(s.db))
+		SetDirectDomainStrategy(models.GetDirectDomainStrategy(s.db)).
+		SetCNIPFallback(models.GetCNIPFallback(s.db))
 
 	cfgObj, err := gen.Generate()
 	if err != nil {

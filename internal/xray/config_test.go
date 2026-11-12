@@ -132,3 +132,102 @@ func TestServerModeXrayConfigGeneration(t *testing.T) {
 		t.Fatalf("invalid test JSON: %v", err)
 	}
 }
+
+func TestCNIPFallbackRule(t *testing.T) {
+	proton := models.Outbound{ID: "out-proton", Tag: "proton", Type: models.OutboundSOCKS5, Server: "127.0.0.1", Port: 1080, Enabled: true}
+	userRule := models.RoutingRule{ID: "r-1", Name: "ads", Type: models.RuleTypeGeoSite, GeoSiteTags: "category-ads", OutboundTag: "block", Priority: 10, Enabled: true}
+
+	gen := xray.NewGenerator().
+		SetOutbounds([]models.Outbound{proton}).
+		SetRoutingRules([]models.RoutingRule{userRule}).
+		SetCNIPFallback("proton")
+
+	cfg, err := gen.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	// api -> ads (user rule) -> geoip:cn catch-all
+	if len(cfg.Routing.Rules) != 3 {
+		t.Fatalf("expected 3 routing rules, got %d: %+v", len(cfg.Routing.Rules), cfg.Routing.Rules)
+	}
+	last := cfg.Routing.Rules[2]
+	if last.OutboundTag != "proton" || len(last.IP) != 1 || last.IP[0] != "geoip:cn" {
+		t.Errorf("catch-all rule = %+v, want geoip:cn -> proton", last)
+	}
+	if cfg.Routing.Rules[1].OutboundTag != "block" {
+		t.Errorf("user rule must sort before the catch-all: %+v", cfg.Routing.Rules)
+	}
+
+	// An explicit user geoip:cn rule still wins (first match), the
+	// catch-all stays after it and is unreachable for CN IPs.
+	directCN := models.RoutingRule{ID: "r-2", Name: "cn-direct", Type: models.RuleTypeGeoIP, GeoIPCodes: "cn", OutboundTag: "direct", Priority: 20, Enabled: true}
+	gen.SetRoutingRules([]models.RoutingRule{userRule, directCN})
+	cfg, err = gen.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(cfg.Routing.Rules) != 4 {
+		t.Fatalf("expected 4 routing rules, got %d", len(cfg.Routing.Rules))
+	}
+	if cfg.Routing.Rules[2].OutboundTag != "direct" || cfg.Routing.Rules[3].OutboundTag != "proton" {
+		t.Errorf("explicit CN rule must precede the catch-all: %+v", cfg.Routing.Rules)
+	}
+
+	// No matching outbound: no rule (never emit a rule pointing at a
+	// missing outbound).
+	gen.SetOutbounds(nil)
+	cfg, err = gen.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for _, r := range cfg.Routing.Rules {
+		if r.OutboundTag == "proton" {
+			t.Errorf("must not emit proton rule without a matching outbound: %+v", cfg.Routing.Rules)
+		}
+	}
+
+	// Disabled outbound: no rule.
+	off := proton
+	off.Enabled = false
+	gen.SetOutbounds([]models.Outbound{off})
+	cfg, err = gen.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for _, r := range cfg.Routing.Rules {
+		if r.OutboundTag == "proton" {
+			t.Errorf("must not emit proton rule for a disabled outbound: %+v", cfg.Routing.Rules)
+		}
+	}
+
+	// Empty tag: disabled.
+	gen.SetOutbounds([]models.Outbound{proton}).SetCNIPFallback("")
+	cfg, err = gen.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for _, r := range cfg.Routing.Rules {
+		if r.OutboundTag == "proton" {
+			t.Errorf("empty tag must disable the proton rule: %+v", cfg.Routing.Rules)
+		}
+	}
+
+	// Built-in fallbacks need no outbound at all: "block" intercepts CN
+	// IPs even when no Proton outbound exists, "direct" passes them out
+	// directly. Both are outbounds the generator always emits.
+	gen.SetOutbounds(nil).SetRoutingRules([]models.RoutingRule{userRule})
+	for _, want := range []string{"block", "direct"} {
+		gen.SetCNIPFallback(want)
+		cfg, err = gen.Generate()
+		if err != nil {
+			t.Fatalf("Generate %s: %v", want, err)
+		}
+		if len(cfg.Routing.Rules) != 3 {
+			t.Fatalf("expected 3 routing rules for %s, got %d", want, len(cfg.Routing.Rules))
+		}
+		last = cfg.Routing.Rules[2]
+		if last.OutboundTag != want || len(last.IP) != 1 || last.IP[0] != "geoip:cn" {
+			t.Errorf("catch-all rule = %+v, want geoip:cn -> %s", last, want)
+		}
+	}
+}

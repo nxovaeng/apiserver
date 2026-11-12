@@ -944,3 +944,72 @@ func TestCFTunnelServiceSetupAndNormalization(t *testing.T) {
 		t.Fatalf("expected stripped token passed to cloudflared service install, calls=%+v", runner.calls)
 	}
 }
+
+func TestGenerateXrayConfigCNIPFallback(t *testing.T) {
+	db, cfg, _ := setupTestEnv(t)
+	if _, err := database.Seed(db, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := models.GetCNIPFallback(db); got != "proton" {
+		t.Fatalf("seeded cn_ip_fallback = %q, want proton", got)
+	}
+	if err := db.Create(&models.Outbound{
+		ID: "out-proton", Tag: "proton", Type: models.OutboundSOCKS5,
+		Server: "127.0.0.1", Port: 1080, Enabled: true,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	sysSvc := service.NewSystemService(db, cfg, nil)
+	_, raw, err := sysSvc.GenerateXrayConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawStr := string(raw)
+	if !strings.Contains(rawStr, "geoip:cn") {
+		t.Fatalf("generated config has no geoip:cn rule: %s", rawStr)
+	}
+	// The catch-all must be the last routing rule, after the api rule.
+	apiIdx := strings.Index(rawStr, `"outboundTag": "api"`)
+	cnIdx := strings.LastIndex(rawStr, "geoip:cn")
+	if apiIdx < 0 || cnIdx < apiIdx {
+		t.Fatalf("geoip:cn rule must come after the api rule: %s", rawStr)
+	}
+	if !strings.Contains(rawStr, `"outboundTag": "proton"`) {
+		t.Fatalf("geoip:cn rule must point at proton: %s", rawStr)
+	}
+
+	// "block" needs no outbound: deleting the proton outbound and switching
+	// the fallback to block still emits the rule, now pointing at block.
+	if err := db.Delete(&models.Outbound{}, "id = ?", "out-proton").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sysSvc.UpdateSettings(dto.UpdateSettingsRequest{
+		CNIPFallback: strPtr("block"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, raw, err = sysSvc.GenerateXrayConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "geoip:cn") || !strings.Contains(string(raw), `"outboundTag": "block"`) {
+		t.Fatalf("block fallback must emit a geoip:cn -> block rule: %s", string(raw))
+	}
+
+	// Disabling the setting removes the rule.
+	if _, err := sysSvc.UpdateSettings(dto.UpdateSettingsRequest{
+		CNIPFallback: strPtr(""),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, raw, err = sysSvc.GenerateXrayConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "geoip:cn") {
+		t.Fatalf("empty cn_ip_fallback must remove the rule: %s", string(raw))
+	}
+}
+
+func strPtr(s string) *string { return &s }

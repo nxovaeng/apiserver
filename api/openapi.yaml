@@ -3918,6 +3918,9 @@ components:
           type: integer
         direct_domain_strategy:
           $ref: "#/components/schemas/DirectDomainStrategy"
+        cn_ip_fallback:
+          type: string
+          description: "Fallback outbound for unmatched CN IPs: outbound tag (default proton), block, direct, or empty to disable the built-in geoip:cn catch-all rule"
         monthly_net_baseline_sent:
           type: string
         monthly_net_baseline_recv:
@@ -3981,6 +3984,9 @@ components:
         direct_domain_strategy:
           allOf:
             - $ref: "#/components/schemas/DirectDomainStrategy"
+          nullable: true
+        cn_ip_fallback:
+          type: string
           nullable: true
 
     SubscriptionNginxResponse:
