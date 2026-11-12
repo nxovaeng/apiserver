@@ -25,6 +25,7 @@ type Handler struct {
 	WireGuard *service.WireGuardService
 	System    *service.SystemService
 	Tunnels   *service.CFTunnelService
+	Speedtest *service.SpeedtestService
 }
 
 func respondOK(c *gin.Context, data interface{}) {
@@ -895,6 +896,51 @@ func (h *Handler) DisableAPINginx(c *gin.Context) {
 // GetCFTunnelStatus handles GET /api/v1/tunnels/cf/status.
 func (h *Handler) GetCFTunnelStatus(c *gin.Context) {
 	respondOK(c, h.Tunnels.GetStatus(c.Request.Context()))
+}
+
+// GetSpeedtestStatus handles GET /api/v1/speedtest.
+func (h *Handler) GetSpeedtestStatus(c *gin.Context) {
+	res, err := h.Speedtest.GetStatus()
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// UpdateSpeedtest handles PUT /api/v1/speedtest.
+func (h *Handler) UpdateSpeedtest(c *gin.Context) {
+	var req dto.UpdateSpeedtestRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, dto.ErrValidation, "Invalid request: "+err.Error(), nil)
+		return
+	}
+	res, err := h.Speedtest.UpdateSettings(req)
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// StartSpeedtest handles POST /api/v1/speedtest/start.
+func (h *Handler) StartSpeedtest(c *gin.Context) {
+	res, err := h.Speedtest.Start()
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// StopSpeedtest handles POST /api/v1/speedtest/stop.
+func (h *Handler) StopSpeedtest(c *gin.Context) {
+	res, err := h.Speedtest.Stop()
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
 }
 
 // InstallCFTunnel handles POST /api/v1/tunnels/cf/install.

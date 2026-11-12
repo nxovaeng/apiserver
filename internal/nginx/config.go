@@ -188,6 +188,60 @@ func (g *ConfigGenerator) GeneratePanelConfig(domain, certPath, keyPath, listenA
 	return g.writeConfig(filename, buf.String())
 }
 
+// SpeedtestConfigPath is the managed nginx config file for the speedtest
+// origin (one file per VPS, not recorded in the NginxConfig table: the
+// speedtest settings row is the source of truth).
+func (g *ConfigGenerator) SpeedtestConfigPath() string {
+	return filepath.Join(g.configDir, "speedtest.conf")
+}
+
+// WriteSpeedtestConfig renders the speedtest origin server block (serves
+// the 50MB test file under subpath, everything else 404) and writes it as
+// a managed file, then validates the nginx config. Call Reload afterwards
+// to activate it.
+func (g *ConfigGenerator) WriteSpeedtestConfig(domain, subpath, filePath string) error {
+	content := fmt.Sprintf(`server {
+    listen 80;
+    server_name %s;
+
+    gzip off;
+
+    access_log /var/log/nginx/speedtest.access.log;
+    error_log /var/log/nginx/speedtest.error.log;
+
+    location = %s/50mb.bin {
+        alias %s;
+        gzip off;
+        add_header Cache-Control "no-store";
+    }
+
+    location / {
+        return 404;
+    }
+}
+`, domain, subpath, filePath)
+	if err := g.writeConfig(g.SpeedtestConfigPath(), content); err != nil {
+		return err
+	}
+	return g.TestConfig()
+}
+
+// RemoveSpeedtestConfig deletes the managed speedtest config file (if any)
+// and validates the remaining nginx config. Call Reload afterwards.
+func (g *ConfigGenerator) RemoveSpeedtestConfig() error {
+	path := g.SpeedtestConfigPath()
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	if !g.isManagedFile(path) {
+		return fmt.Errorf("file %s exists and is not managed by Xray Panel", path)
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return g.TestConfig()
+}
+
 // GenerateHTTPConfig generates Nginx HTTP server blocks for enabled inbounds with domains.
 func (g *ConfigGenerator) GenerateHTTPConfig(inbounds []models.Inbound) error {
 	domainInbounds := make(map[string][]models.Inbound)

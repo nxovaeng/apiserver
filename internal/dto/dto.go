@@ -711,6 +711,27 @@ type UpdateSettingsRequest struct {
 	CNIPFallback         *string `json:"cn_ip_fallback"`
 }
 
+// SpeedtestStatus is the state of the speedtest origin (the 50MB test
+// file served by nginx for the cfst client probes).
+type SpeedtestStatus struct {
+	Enabled    bool   `json:"enabled"`
+	Domain     string `json:"domain"`
+	SubPath    string `json:"sub_path"`
+	FileExists bool   `json:"file_exists"`
+	FileSize   int64  `json:"file_size"`
+	// URL is the full test-file URL when enabled and a domain is set.
+	URL string `json:"url"`
+	// ConfigPath is the managed nginx config file while enabled.
+	ConfigPath string `json:"config_path"`
+}
+
+// UpdateSpeedtestRequest updates the speedtest domain/subpath. When the
+// origin is enabled the nginx config is rewritten and reloaded.
+type UpdateSpeedtestRequest struct {
+	Domain  *string `json:"domain"`
+	SubPath *string `json:"sub_path"`
+}
+
 type SubscriptionNginxResponse struct {
 	Enabled           bool   `json:"enabled"`
 	Domain            string `json:"domain"`

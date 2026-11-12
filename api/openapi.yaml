@@ -1371,6 +1371,74 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /api/v1/speedtest:
+    get:
+      tags: [Xray & System]
+      summary: Get speedtest origin status (50MB test file + nginx, off unless started)
+      operationId: getSpeedtestStatus
+      responses:
+        "200":
+          description: Speedtest origin status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeedtestEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    put:
+      tags: [Xray & System]
+      summary: Update speedtest domain/subpath (rewrites nginx config when enabled)
+      operationId: updateSpeedtest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateSpeedtestRequest"
+      responses:
+        "200":
+          description: Updated speedtest origin status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeedtestEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/speedtest/start:
+    post:
+      tags: [Xray & System]
+      summary: Start speedtest origin (create 50MB test file, write nginx config, reload)
+      operationId: startSpeedtest
+      responses:
+        "200":
+          description: Speedtest origin started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeedtestEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/speedtest/stop:
+    post:
+      tags: [Xray & System]
+      summary: Stop speedtest origin (remove nginx config, reload; test file stays on disk)
+      operationId: stopSpeedtest
+      responses:
+        "200":
+          description: Speedtest origin stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeedtestEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /api/v1/panel/restart:
     post:
       tags: [Xray & System]
@@ -3937,6 +4005,45 @@ components:
           enum: [true]
         data:
           $ref: "#/components/schemas/SettingsDTO"
+
+    SpeedtestStatus:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        domain:
+          type: string
+        sub_path:
+          type: string
+        file_exists:
+          type: boolean
+        file_size:
+          type: integer
+          format: int64
+        url:
+          type: string
+        config_path:
+          type: string
+
+    SpeedtestEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/SpeedtestStatus"
+
+    UpdateSpeedtestRequest:
+      type: object
+      properties:
+        domain:
+          type: string
+          nullable: true
+        sub_path:
+          type: string
+          nullable: true
 
     UpdateSettingsRequest:
       type: object

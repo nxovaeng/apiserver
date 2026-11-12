@@ -60,6 +60,7 @@ func NewServer(cfg *config.Config, db *gorm.DB, version string) *Server {
 	domainSvc := service.NewDomainService(db, cfg)
 	wgSvc := service.NewWireGuardService(db)
 	sysSvc := service.NewSystemService(db, cfg, nginxGen)
+	speedtestSvc := service.NewSpeedtestService(db, cfg, nginxGen)
 	dashSvc := service.NewDashboardService(db, sysSvc)
 	subSvc := service.NewSubscriptionService(db)
 	tunnelSvc := service.NewCFTunnelService(db, cfg)
@@ -101,6 +102,7 @@ func NewServer(cfg *config.Config, db *gorm.DB, version string) *Server {
 			WireGuard: wgSvc,
 			System:    sysSvc,
 			Tunnels:   tunnelSvc,
+			Speedtest: speedtestSvc,
 		},
 	}
 
@@ -240,6 +242,10 @@ func (s *Server) setupRoutes() {
 		apiV1.POST("/xray/apply", s.v1Handler.ApplyXrayConfig)
 		apiV1.GET("/settings", s.v1Handler.GetSettings)
 		apiV1.PUT("/settings", s.v1Handler.UpdateSettings)
+		apiV1.GET("/speedtest", s.v1Handler.GetSpeedtestStatus)
+		apiV1.PUT("/speedtest", s.v1Handler.UpdateSpeedtest)
+		apiV1.POST("/speedtest/start", s.v1Handler.StartSpeedtest)
+		apiV1.POST("/speedtest/stop", s.v1Handler.StopSpeedtest)
 		apiV1.POST("/panel/restart", s.v1Handler.RestartPanel)
 		apiV1.GET("/logs", s.v1Handler.GetLogs)
 		apiV1.GET("/logs/stream", s.v1Handler.StreamLogs)

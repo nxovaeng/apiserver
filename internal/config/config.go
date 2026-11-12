@@ -10,13 +10,21 @@ import (
 
 // Config holds all configuration for xray-panel-server.
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Auth     AuthConfig     `yaml:"auth"`
-	Log      LogConfig      `yaml:"log"`
-	Database DatabaseConfig `yaml:"database"`
-	Xray     XrayConfig     `yaml:"xray"`
-	Nginx    NginxConfig    `yaml:"nginx"`
-	Acme     AcmeConfig     `yaml:"acme"`
+	Server    ServerConfig    `yaml:"server"`
+	Auth      AuthConfig      `yaml:"auth"`
+	Log       LogConfig       `yaml:"log"`
+	Database  DatabaseConfig  `yaml:"database"`
+	Xray      XrayConfig      `yaml:"xray"`
+	Nginx     NginxConfig     `yaml:"nginx"`
+	Acme      AcmeConfig      `yaml:"acme"`
+	Speedtest SpeedtestConfig `yaml:"speedtest"`
+}
+
+// SpeedtestConfig holds the speedtest origin (test file) location. The file
+// itself is fixed at 50 MiB (50mb.bin) to match the cfst strategy
+// (FILE_SIZE_MB=50); only its directory is configurable.
+type SpeedtestConfig struct {
+	FileDir string `yaml:"file_dir"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -130,6 +138,9 @@ func (c *Config) applyDefaults() {
 	if c.Nginx.CertDir == "" {
 		c.Nginx.CertDir = "/root/.acme.sh"
 	}
+	if c.Speedtest.FileDir == "" {
+		c.Speedtest.FileDir = "/var/www/speedtest"
+	}
 	if c.Acme.AutoInstall == nil {
 		v := true
 		c.Acme.AutoInstall = &v
@@ -207,6 +218,9 @@ func Default() *Config {
 			ReloadCmd: "systemctl reload nginx",
 			TestCmd:   "nginx -t",
 			CertDir:   "/root/.acme.sh",
+		},
+		Speedtest: SpeedtestConfig{
+			FileDir: "/var/www/speedtest",
 		},
 	}
 }

@@ -47,6 +47,7 @@ func setupTestServer(t *testing.T) (*api.Server, string, string) {
 	cfg.Nginx.CertDir = filepath.Join(tmpDir, "acme")
 	cfg.Nginx.ReloadCmd = "true"
 	cfg.Nginx.TestCmd = "true"
+	cfg.Speedtest.FileDir = filepath.Join(tmpDir, "speedtest")
 	cfg.Xray.ConfigPath = filepath.Join(tmpDir, "xray", "config.json")
 	cfg.Xray.TestConfigDir = filepath.Join(tmpDir, "xray-test")
 	cfg.Xray.AssetsPath = filepath.Join(tmpDir, "xray-assets")
@@ -389,5 +390,44 @@ func TestCertUploadSubscriptionNginxAndTunnelRoutes(t *testing.T) {
 	rec = doRequest(t, h, http.MethodGet, "/api/v1/tunnels/cf/status", token, nil, "")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"recommended_path_rule":"/d/*"`) {
 		t.Fatalf("GET /api/v1/tunnels/cf/status unexpected: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSpeedtestEndpoints(t *testing.T) {
+	srv, token, _ := setupTestServer(t)
+	h := srv.Handler()
+
+	rec := doRequest(t, h, http.MethodGet, "/api/v1/speedtest", "", nil, "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /api/v1/speedtest without token: got %d, want 401", rec.Code)
+	}
+
+	rec = doRequest(t, h, http.MethodGet, "/api/v1/speedtest", token, nil, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"enabled":false`) || !strings.Contains(rec.Body.String(), `"sub_path":"/speedtest"`) {
+		t.Fatalf("GET /api/v1/speedtest unexpected: %d %s", rec.Code, rec.Body.String())
+	}
+
+	bad := "not a domain"
+	rec = doRequest(t, h, http.MethodPut, "/api/v1/speedtest", token, dto.UpdateSpeedtestRequest{Domain: &bad}, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT invalid domain: got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+
+	dom := "jp-speed.example.com"
+	sub := "/x7f9k2"
+	rec = doRequest(t, h, http.MethodPut, "/api/v1/speedtest", token, dto.UpdateSpeedtestRequest{Domain: &dom, SubPath: &sub}, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"domain":"jp-speed.example.com"`) || !strings.Contains(rec.Body.String(), `"sub_path":"/x7f9k2"`) {
+		t.Fatalf("PUT /api/v1/speedtest failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Start/stop work end to end through the test server (file + nginx
+	// config land in temp dirs via setupTestServer).
+	rec = doRequest(t, h, http.MethodPost, "/api/v1/speedtest/start", token, nil, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"enabled":true`) {
+		t.Fatalf("POST /api/v1/speedtest/start failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doRequest(t, h, http.MethodPost, "/api/v1/speedtest/stop", token, nil, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"enabled":false`) {
+		t.Fatalf("POST /api/v1/speedtest/stop failed: %d %s", rec.Code, rec.Body.String())
 	}
 }
