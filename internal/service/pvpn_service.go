@@ -484,7 +484,7 @@ func (s *PVPNService) ImportSession(ctx context.Context, req dto.PVPNImportSessi
 	}
 
 	if err := s.manager.ImportSession(ctx, sess); err != nil {
-		return nil, NewValidationError("导入 Session 失败: "+err.Error())
+		return nil, NewValidationError("导入 Session 失败: " + err.Error())
 	}
 
 	loaded, _ := s.manager.LoadSession()
