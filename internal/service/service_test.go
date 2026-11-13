@@ -505,6 +505,15 @@ esac
 		t.Fatalf("unchanged apply rewrote the config file")
 	}
 
+	// 2.1 Force apply without changes: bypasses unchanged check and re-applies.
+	forceRes, err := sysSvc.ApplyXrayConfig(dto.XrayApplyRequest{Force: true})
+	if err != nil || !forceRes.Applied || !forceRes.Changed || forceRes.Method != "force_restart" {
+		t.Fatalf("expected forced apply to succeed: %+v err=%v", forceRes, err)
+	}
+	if !strings.Contains(forceRes.Message, "强制") {
+		t.Fatalf("unexpected force apply message: %q", forceRes.Message)
+	}
+
 	// 3. Change the config (log level) -> preview dirty, apply writes + keeps .bak.
 	debugLvl := "debug"
 	if _, err := sysSvc.UpdateSettings(dto.UpdateSettingsRequest{XrayLogLevel: &debugLvl}); err != nil {

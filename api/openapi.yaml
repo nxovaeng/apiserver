@@ -1319,8 +1319,21 @@ paths:
   /api/v1/xray/apply:
     post:
       tags: [Xray & System]
-      summary: Generate, validate (`xray -test`), write Xray/Nginx configs, and restart/reload services; no-op when config is unchanged
+      summary: Generate, validate (`xray -test`), write Xray/Nginx configs, and restart/reload services; no-op when config is unchanged unless force is true
       operationId: applyXrayConfig
+      parameters:
+        - name: force
+          in: query
+          description: Force write and apply even if config is unchanged
+          required: false
+          schema:
+            type: boolean
+        - name: hot
+          in: query
+          description: Request hot reload if supported
+          required: false
+          schema:
+            type: boolean
       responses:
         "200":
           description: Configuration applied

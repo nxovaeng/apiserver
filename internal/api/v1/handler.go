@@ -815,7 +815,17 @@ func (h *Handler) GetXrayConfig(c *gin.Context) {
 
 // ApplyXrayConfig handles POST /api/v1/xray/apply.
 func (h *Handler) ApplyXrayConfig(c *gin.Context) {
-	res, err := h.System.ApplyXrayConfig()
+	var req dto.XrayApplyRequest
+	if c.Request.ContentLength > 0 {
+		_ = c.ShouldBindJSON(&req)
+	}
+	if c.Query("force") == "true" || c.Query("force") == "1" {
+		req.Force = true
+	}
+	if c.Query("hot") == "true" || c.Query("hot") == "1" {
+		req.Hot = true
+	}
+	res, err := h.System.ApplyXrayConfig(req)
 	if err != nil {
 		respondServiceError(c, err)
 		return

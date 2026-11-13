@@ -665,6 +665,11 @@ type XrayConfigResponse struct {
 	Dirty       bool                   `json:"dirty"`
 }
 
+type XrayApplyRequest struct {
+	Hot   bool `json:"hot"`
+	Force bool `json:"force"`
+}
+
 type XrayApplyResponse struct {
 	Applied   bool     `json:"applied"`
 	Method    string   `json:"method"`

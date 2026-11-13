@@ -305,7 +305,7 @@ func syncManagedNginx(db *gorm.DB, nginxGen *nginx.ConfigGenerator, reload bool,
 	}
 
 	var inbounds []models.Inbound
-	if err := db.Preload("Domain").Where("enabled = ?", true).Find(&inbounds).Error; err != nil {
+	if err := db.Preload("Domain").Where("enabled = ?", true).Order("id ASC").Find(&inbounds).Error; err != nil {
 		return info, NewInternalError("Failed to load inbounds for Nginx sync", err)
 	}
 	if err := nginxGen.GenerateHTTPConfig(inbounds); err != nil {
@@ -455,16 +455,16 @@ func (s *SystemService) GenerateXrayConfig() (*xray.Config, []byte, error) {
 	var outbounds []models.Outbound
 	var rules []models.RoutingRule
 
-	if err := s.db.Where("enabled = ?", true).Find(&users).Error; err != nil {
+	if err := s.db.Where("enabled = ?", true).Order("id ASC").Find(&users).Error; err != nil {
 		return nil, nil, NewInternalError("Failed to load users for Xray config", err)
 	}
-	if err := s.db.Preload("Domain").Where("enabled = ?", true).Find(&inbounds).Error; err != nil {
+	if err := s.db.Preload("Domain").Where("enabled = ?", true).Order("id ASC").Find(&inbounds).Error; err != nil {
 		return nil, nil, NewInternalError("Failed to load inbounds for Xray config", err)
 	}
-	if err := s.db.Where("enabled = ?", true).Find(&outbounds).Error; err != nil {
+	if err := s.db.Where("enabled = ?", true).Order("id ASC").Find(&outbounds).Error; err != nil {
 		return nil, nil, NewInternalError("Failed to load outbounds for Xray config", err)
 	}
-	if err := s.db.Where("enabled = ?", true).Order("priority ASC").Find(&rules).Error; err != nil {
+	if err := s.db.Where("enabled = ?", true).Order("priority ASC, id ASC").Find(&rules).Error; err != nil {
 		return nil, nil, NewInternalError("Failed to load routing rules for Xray config", err)
 	}
 
@@ -644,10 +644,12 @@ func maskClientID(v interface{}) interface{} {
 
 // ApplyXrayConfig generates the Xray config from DB state and applies it on
 // demand: if the generated config is identical to both the on-disk file and
-// the last successfully applied config, nothing is written or restarted.
-// Otherwise it validates the new config, writes it atomically and restarts
-// Xray. There is no hot reload: every real change restarts Xray.
-func (s *SystemService) ApplyXrayConfig() (*dto.XrayApplyResponse, error) {
+// the last successfully applied config (and force is false), nothing is written
+// or restarted. If force is true, hash checks are bypassed and config is
+// unconditionally written, validated, and both Xray and managed Nginx reloaded.
+// There is no hot reload: every real change restarts Xray.
+func (s *SystemService) ApplyXrayConfig(req ...dto.XrayApplyRequest) (*dto.XrayApplyResponse, error) {
+	force := len(req) > 0 && req[0].Force
 	_, configJSON, err := s.GenerateXrayConfig()
 	if err != nil {
 		return nil, err
@@ -667,18 +669,20 @@ func (s *SystemService) ApplyXrayConfig() (*dto.XrayApplyResponse, error) {
 	currentHash := sha256Hex(configJSON)
 	appliedHash := GetAppliedConfigHash(s.db)
 
-	// 脏检查：磁盘内容与上次成功应用的哈希都与当前一致时直接返回，不写盘、
+	// 脏检查：未开启 force 时，磁盘内容与上次成功应用的哈希都与当前一致时直接返回，不写盘、
 	// 不校验、不重启、不碰 nginx。appliedHash 也要比对：上次应用若在重启
 	// 环节失败，磁盘已是新配置但 xray 仍跑着旧配置，此时必须重试重启，
-	// 不能直接返回 unchanged。
-	if disk, err := os.ReadFile(configPath); err == nil && sha256Hex(disk) == currentHash && appliedHash == currentHash {
-		return &dto.XrayApplyResponse{
-			Applied:   false,
-			Method:    "unchanged",
-			ConfigLen: len(configJSON),
-			Changed:   false,
-			Message:   "配置无变化，未重启",
-		}, nil
+	// 不能直接返回 unchanged。开启 force 时跳过脏检查，强制写盘、重启 xray 并全量同步 nginx。
+	if !force {
+		if disk, err := os.ReadFile(configPath); err == nil && sha256Hex(disk) == currentHash && appliedHash == currentHash {
+			return &dto.XrayApplyResponse{
+				Applied:   false,
+				Method:    "unchanged",
+				ConfigLen: len(configJSON),
+				Changed:   false,
+				Message:   "配置无变化，未重启",
+			}, nil
+		}
 	}
 
 	testConfigDir := resolveXrayTestConfigDir(s.cfg)
@@ -743,13 +747,20 @@ func (s *SystemService) ApplyXrayConfig() (*dto.XrayApplyResponse, error) {
 		applogger.Warn("Failed to record applied Xray config hash: %v", err)
 	}
 
+	method := "restart"
+	msg := "配置已写入文件并重启服务"
+	if force {
+		method = "force_restart"
+		msg = "配置已强制写入并重启 Xray 与 Nginx 服务"
+	}
+
 	return &dto.XrayApplyResponse{
 		Applied:   true,
-		Method:    "restart",
+		Method:    method,
 		ConfigLen: len(configJSON),
 		Changed:   true,
 		Warnings:  warnings,
-		Message:   "配置已写入文件并重启服务",
+		Message:   msg,
 	}, nil
 }
 
