@@ -905,10 +905,28 @@ type PVPNConfigResponse struct {
 	Message     string `json:"message,omitempty"`
 }
 
+type PVPNLoginRequest struct {
+	CaptchaToken string `json:"captcha_token,omitempty"`
+}
+
+type PVPNImportSessionRequest struct {
+	AccessToken   string `json:"access_token" binding:"required"`
+	RefreshToken  string `json:"refresh_token,omitempty"`
+	UID           string `json:"uid,omitempty"`
+	UserID        string `json:"user_id,omitempty"`
+	WGPrivateKey  string `json:"wg_private_key,omitempty"`
+	WGCertificate string `json:"wg_certificate,omitempty"`
+	CertExpiresAt int64  `json:"cert_expires_at,omitempty"`
+}
+
 type PVPNLoginResponse struct {
-	Success       bool   `json:"success"`
-	Message       string `json:"message"`
-	CertExpiresAt int64  `json:"cert_expires_at"`
-	AuthMode      string `json:"auth_mode"`
-	SessionPath   string `json:"session_path,omitempty"`
+	Success                 bool     `json:"success"`
+	Message                 string   `json:"message"`
+	CertExpiresAt           int64    `json:"cert_expires_at,omitempty"`
+	AuthMode                string   `json:"auth_mode,omitempty"`
+	SessionPath             string   `json:"session_path,omitempty"`
+	HumanVerificationNeeded bool     `json:"human_verification_needed,omitempty"`
+	CaptchaWebURL           string   `json:"captcha_web_url,omitempty"`
+	CaptchaToken            string   `json:"captcha_token,omitempty"`
+	CaptchaMethods          []string `json:"captcha_methods,omitempty"`
 }

@@ -54,6 +54,10 @@ type Manager struct {
 
 	watchdogCancel context.CancelFunc
 	failCount      int
+
+	pendingAnonToken string
+	pendingAnonUID   string
+	pendingChallenge *CaptchaChallenge
 }
 
 // NewManager creates a new Proton Manager.
@@ -299,17 +303,37 @@ func (m *Manager) EnsureValidSession(ctx context.Context) (*Session, error) {
 	return sess, nil
 }
 
-// ForceLoginGuest performs an explicit fresh guest login and issues a new 24-hour certificate.
-func (m *Manager) ForceLoginGuest(ctx context.Context) (*Session, error) {
-	newSess, err := m.client.LoginGuest(ctx)
+// ForceLoginGuest performs an explicit fresh guest login or resumes with a solved captcha token.
+func (m *Manager) ForceLoginGuest(ctx context.Context, captchaToken string) (*Session, *CaptchaChallenge, error) {
+	m.mu.Lock()
+	anonToken := m.pendingAnonToken
+	anonUID := m.pendingAnonUID
+	m.mu.Unlock()
+
+	newSess, challenge, err := m.client.LoginGuestWithCaptcha(ctx, anonToken, anonUID, captchaToken)
 	if err != nil {
-		return nil, fmt.Errorf("guest login failed: %w", err)
+		return nil, nil, fmt.Errorf("guest login failed: %w", err)
 	}
+	if challenge != nil {
+		m.mu.Lock()
+		m.pendingAnonToken = challenge.AnonToken
+		m.pendingAnonUID = challenge.AnonUID
+		m.pendingChallenge = challenge
+		m.mu.Unlock()
+		return nil, challenge, nil
+	}
+
+	m.mu.Lock()
+	m.pendingAnonToken = ""
+	m.pendingAnonUID = ""
+	m.pendingChallenge = nil
+	m.mu.Unlock()
+
 	if err := m.client.RegisterCertificate(ctx, newSess); err != nil {
-		return nil, fmt.Errorf("register certificate failed: %w", err)
+		return nil, nil, fmt.Errorf("register certificate failed: %w", err)
 	}
 	if err := m.SaveSession(newSess); err != nil {
-		return nil, fmt.Errorf("save session failed: %w", err)
+		return nil, nil, fmt.Errorf("save session failed: %w", err)
 	}
 
 	// Refresh server list in background or synchronously
@@ -325,7 +349,44 @@ func (m *Manager) ForceLoginGuest(ctx context.Context) (*Session, error) {
 		}
 	}
 
-	return newSess, nil
+	return newSess, nil, nil
+}
+
+// ImportSession writes a pre-configured or externally obtained session to disk and activates it.
+func (m *Manager) ImportSession(ctx context.Context, sess *Session) error {
+	if sess == nil || sess.AccessToken == "" {
+		return fmt.Errorf("access token is required")
+	}
+	if sess.UID == "" {
+		sess.UID = sess.AccessToken
+	}
+	if sess.AuthMode == "" {
+		sess.AuthMode = "imported"
+	}
+
+	now := time.Now().Unix()
+	if sess.WGPrivateKey == "" || sess.CertExpiresAt == 0 || (sess.CertExpiresAt-now) < 60 {
+		if err := m.client.RegisterCertificate(ctx, sess); err != nil {
+			return fmt.Errorf("register certificate on imported session failed: %w", err)
+		}
+	}
+
+	if err := m.SaveSession(sess); err != nil {
+		return fmt.Errorf("save imported session failed: %w", err)
+	}
+
+	_, _ = m.RefreshServers(ctx)
+
+	if m.IsRunning() {
+		m.mu.RLock()
+		activeSrv := m.activeSrv
+		m.mu.RUnlock()
+		if activeSrv != nil {
+			_ = m.Start(ctx, activeSrv)
+		}
+	}
+
+	return nil
 }
 
 func (m *Manager) loadCachedServers() []Server {

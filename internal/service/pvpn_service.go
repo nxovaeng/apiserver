@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 	"xray-panel-server/internal/config"
@@ -422,14 +423,27 @@ func (s *PVPNService) UpdateConfig(ctx context.Context, req dto.PVPNConfigReques
 }
 
 // Login triggers an explicit fresh guest login, fetches a 24h certificate, and refreshes nodes.
-func (s *PVPNService) Login(ctx context.Context) (*dto.PVPNLoginResponse, error) {
+// If Proton API triggers human verification (CAPTCHA), it returns the verification WebUrl and token.
+func (s *PVPNService) Login(ctx context.Context, req dto.PVPNLoginRequest) (*dto.PVPNLoginResponse, error) {
 	if s.manager == nil {
 		return nil, NewInternalError("Proton 引擎未就绪", nil)
 	}
 
-	sess, err := s.manager.ForceLoginGuest(ctx)
+	sess, challenge, err := s.manager.ForceLoginGuest(ctx, strings.TrimSpace(req.CaptchaToken))
 	if err != nil {
 		return nil, NewSystemCommandError("Proton 访客登录失败: "+err.Error(), err)
+	}
+
+	if challenge != nil {
+		return &dto.PVPNLoginResponse{
+			Success:                 false,
+			Message:                 fmt.Sprintf("Proton 要求人机验证 (Code %d): %s", challenge.Code, challenge.Error),
+			HumanVerificationNeeded: true,
+			CaptchaWebURL:           challenge.WebURL,
+			CaptchaToken:            challenge.Token,
+			CaptchaMethods:          challenge.Methods,
+			SessionPath:             s.manager.GetSessionPath(),
+		}, nil
 	}
 
 	return &dto.PVPNLoginResponse{
@@ -437,6 +451,53 @@ func (s *PVPNService) Login(ctx context.Context) (*dto.PVPNLoginResponse, error)
 		Message:       "已成功获取最新 Proton 访客凭据与 24 小时 WireGuard 证书",
 		CertExpiresAt: sess.CertExpiresAt,
 		AuthMode:      sess.AuthMode,
+		SessionPath:   s.manager.GetSessionPath(),
+	}, nil
+}
+
+// ImportSession imports a session directly and synchronizes the WireGuard certificate.
+func (s *PVPNService) ImportSession(ctx context.Context, req dto.PVPNImportSessionRequest) (*dto.PVPNLoginResponse, error) {
+	if s.manager == nil {
+		return nil, NewInternalError("Proton 引擎未就绪", nil)
+	}
+
+	token := strings.TrimSpace(req.AccessToken)
+	if token == "" {
+		return nil, NewValidationError("access_token 不能为空")
+	}
+
+	uid := strings.TrimSpace(req.UID)
+	if uid == "" {
+		uid = token
+	}
+
+	sess := &proton.Session{
+		AccessToken:   token,
+		RefreshToken:  strings.TrimSpace(req.RefreshToken),
+		UID:           uid,
+		UserID:        strings.TrimSpace(req.UserID),
+		WGPrivateKey:  strings.TrimSpace(req.WGPrivateKey),
+		WGCertificate: strings.TrimSpace(req.WGCertificate),
+		CertExpiresAt: req.CertExpiresAt,
+		AuthMode:      "imported",
+		UpdatedAt:     time.Now().Unix(),
+	}
+
+	if err := s.manager.ImportSession(ctx, sess); err != nil {
+		return nil, NewValidationError("导入 Session 失败: "+err.Error())
+	}
+
+	loaded, _ := s.manager.LoadSession()
+	exp := int64(0)
+	if loaded != nil {
+		exp = loaded.CertExpiresAt
+	}
+
+	return &dto.PVPNLoginResponse{
+		Success:       true,
+		Message:       "已成功导入 Proton Session 凭据并同步 WireGuard 证书",
+		CertExpiresAt: exp,
+		AuthMode:      "imported",
 		SessionPath:   s.manager.GetSessionPath(),
 	}, nil
 }

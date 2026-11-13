@@ -1212,7 +1212,28 @@ func (h *Handler) LoginPVPN(c *gin.Context) {
 		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
 		return
 	}
-	res, err := h.PVPN.Login(c.Request.Context())
+	var req dto.PVPNLoginRequest
+	_ = c.ShouldBindJSON(&req)
+	res, err := h.PVPN.Login(c.Request.Context(), req)
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// ImportPVPNsession handles POST /api/v1/pvpn/session.
+func (h *Handler) ImportPVPNsession(c *gin.Context) {
+	if h.PVPN == nil {
+		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
+		return
+	}
+	var req dto.PVPNImportSessionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondServiceError(c, service.NewValidationError("无效的 Session 数据: "+err.Error()))
+		return
+	}
+	res, err := h.PVPN.ImportSession(c.Request.Context(), req)
 	if err != nil {
 		respondServiceError(c, err)
 		return

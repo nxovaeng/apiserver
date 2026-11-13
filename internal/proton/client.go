@@ -38,7 +38,50 @@ func (c *Client) SetHTTPClient(hc *http.Client) {
 	}
 }
 
-func (c *Client) doRequest(ctx context.Context, method, endpoint string, session *Session, payload any) ([]byte, error) {
+// CaptchaChallenge holds details when Proton API requires human verification.
+type CaptchaChallenge struct {
+	Code      int      `json:"code"`
+	Error     string   `json:"error"`
+	Token     string   `json:"token"`
+	WebURL    string   `json:"web_url"`
+	Methods   []string `json:"methods"`
+	ExpiresAt int64    `json:"expires_at"`
+	AnonToken string   `json:"anon_token,omitempty"`
+	AnonUID   string   `json:"anon_uid,omitempty"`
+}
+
+func parseCaptchaChallenge(body []byte, anonToken, anonUID string) *CaptchaChallenge {
+	if len(body) == 0 {
+		return nil
+	}
+	var res struct {
+		Code    int    `json:"Code"`
+		Error   string `json:"Error"`
+		Details struct {
+			HumanVerificationToken   string   `json:"HumanVerificationToken"`
+			HumanVerificationMethods []string `json:"HumanVerificationMethods"`
+			WebUrl                   string   `json:"WebUrl"`
+			ExpiresAt                int64    `json:"ExpiresAt"`
+		} `json:"Details"`
+	}
+	if err := json.Unmarshal(body, &res); err == nil {
+		if res.Code == 9001 || res.Code == 12087 || res.Details.WebUrl != "" {
+			return &CaptchaChallenge{
+				Code:      res.Code,
+				Error:     res.Error,
+				Token:     res.Details.HumanVerificationToken,
+				WebURL:    res.Details.WebUrl,
+				Methods:   res.Details.HumanVerificationMethods,
+				ExpiresAt: res.Details.ExpiresAt,
+				AnonToken: anonToken,
+				AnonUID:   anonUID,
+			}
+		}
+	}
+	return nil
+}
+
+func (c *Client) doRequest(ctx context.Context, method, endpoint string, session *Session, payload any, extraHeaders ...map[string]string) ([]byte, error) {
 	url := c.baseURL + endpoint
 	var body io.Reader
 	if payload != nil {
@@ -60,6 +103,12 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, session
 	req.Header.Set("Accept", "application/vnd.protonmail.v1+json")
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+
+	for _, eh := range extraHeaders {
+		for k, v := range eh {
+			req.Header.Set(k, v)
+		}
 	}
 
 	if session != nil && session.AccessToken != "" {
@@ -90,43 +139,72 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, session
 	return respBytes, nil
 }
 
-// LoginGuest performs the 2-phase guest login:
+// LoginGuest performs the standard 2-phase guest login.
+func (c *Client) LoginGuest(ctx context.Context) (*Session, error) {
+	sess, challenge, err := c.LoginGuestWithCaptcha(ctx, "", "", "")
+	if err != nil {
+		return nil, err
+	}
+	if challenge != nil {
+		return nil, fmt.Errorf("Proton 要求人机验证 (Code %d): %s (WebUrl: %s)", challenge.Code, challenge.Error, challenge.WebURL)
+	}
+	return sess, nil
+}
+
+// LoginGuestWithCaptcha performs or resumes the 2-phase guest login with optional captcha token:
 // Phase 0: Request anonymous session (/auth/v4/sessions)
 // Phase 1: Upgrade to credential-less guest session (/auth/v4/credentialless)
-func (c *Client) LoginGuest(ctx context.Context) (*Session, error) {
+func (c *Client) LoginGuestWithCaptcha(ctx context.Context, anonToken, anonUID, captchaToken string) (*Session, *CaptchaChallenge, error) {
 	deviceHash := GetDeviceHash()
 	challenge := BuildChallengePayload(deviceHash)
 
-	// Phase 0: Anonymous session
-	body0, err := c.doRequest(ctx, http.MethodPost, "/auth/v4/sessions", nil, challenge)
-	if err != nil {
-		return nil, fmt.Errorf("phase 0 request failed: %w", err)
-	}
+	// Phase 0: Request anonymous session if not yet obtained
+	if anonToken == "" || anonUID == "" {
+		body0, err := c.doRequest(ctx, http.MethodPost, "/auth/v4/sessions", nil, challenge)
+		if err != nil {
+			if challengeObj := parseCaptchaChallenge(body0, "", ""); challengeObj != nil {
+				return nil, challengeObj, nil
+			}
+			return nil, nil, fmt.Errorf("phase 0 request failed: %w", err)
+		}
 
-	var res0 struct {
-		Code        int    `json:"Code"`
-		Error       string `json:"Error"`
-		AccessToken string `json:"AccessToken"`
-		UID         string `json:"UID"`
-	}
-	if err := json.Unmarshal(body0, &res0); err != nil {
-		return nil, fmt.Errorf("parse phase 0 response failed: %w", err)
-	}
-	if res0.Code != 1000 {
-		return nil, fmt.Errorf("phase 0 failed (Code %d): %s", res0.Code, res0.Error)
-	}
-	if res0.AccessToken == "" || res0.UID == "" {
-		return nil, fmt.Errorf("missing AccessToken or UID in phase 0 response")
-	}
+		var res0 struct {
+			Code        int    `json:"Code"`
+			Error       string `json:"Error"`
+			AccessToken string `json:"AccessToken"`
+			UID         string `json:"UID"`
+		}
+		if err := json.Unmarshal(body0, &res0); err != nil {
+			return nil, nil, fmt.Errorf("parse phase 0 response failed: %w", err)
+		}
+		if res0.Code != 1000 {
+			if challengeObj := parseCaptchaChallenge(body0, "", ""); challengeObj != nil {
+				return nil, challengeObj, nil
+			}
+			return nil, nil, fmt.Errorf("phase 0 failed (Code %d): %s", res0.Code, res0.Error)
+		}
+		if res0.AccessToken == "" || res0.UID == "" {
+			return nil, nil, fmt.Errorf("missing AccessToken or UID in phase 0 response")
+		}
 
-	anonToken := res0.AccessToken
-	anonUID := res0.UID
+		anonToken = res0.AccessToken
+		anonUID = res0.UID
+	}
 
 	// Phase 1: Upgrade to guest session
 	tempSession := &Session{AccessToken: anonToken, UID: anonUID}
-	body1, err := c.doRequest(ctx, http.MethodPost, "/auth/v4/credentialless", tempSession, challenge)
+	extraHeaders := make(map[string]string)
+	if captchaToken != "" {
+		extraHeaders["x-pm-human-verification-token"] = captchaToken
+		extraHeaders["x-pm-human-verification-token-type"] = "captcha"
+	}
+
+	body1, err := c.doRequest(ctx, http.MethodPost, "/auth/v4/credentialless", tempSession, challenge, extraHeaders)
 	if err != nil {
-		return nil, fmt.Errorf("phase 1 guest upgrade failed: %w", err)
+		if challengeObj := parseCaptchaChallenge(body1, anonToken, anonUID); challengeObj != nil {
+			return nil, challengeObj, nil
+		}
+		return nil, nil, fmt.Errorf("phase 1 guest upgrade failed: %w", err)
 	}
 
 	var res1 struct {
@@ -138,10 +216,13 @@ func (c *Client) LoginGuest(ctx context.Context) (*Session, error) {
 		UserID       string `json:"UserID"`
 	}
 	if err := json.Unmarshal(body1, &res1); err != nil {
-		return nil, fmt.Errorf("parse phase 1 response failed: %w", err)
+		return nil, nil, fmt.Errorf("parse phase 1 response failed: %w", err)
 	}
 	if res1.Code != 1000 {
-		return nil, fmt.Errorf("phase 1 failed (Code %d): %s", res1.Code, res1.Error)
+		if challengeObj := parseCaptchaChallenge(body1, anonToken, anonUID); challengeObj != nil {
+			return nil, challengeObj, nil
+		}
+		return nil, nil, fmt.Errorf("phase 1 failed (Code %d): %s", res1.Code, res1.Error)
 	}
 
 	finalToken := res1.AccessToken
@@ -164,7 +245,7 @@ func (c *Client) LoginGuest(ctx context.Context) (*Session, error) {
 		UpdatedAt:    now,
 	}
 
-	return session, nil
+	return session, nil, nil
 }
 
 // RegisterCertificate generates a new WireGuard keypair and requests a 1-day signed certificate.

@@ -247,7 +247,7 @@ func TestPVPNService(t *testing.T) {
 	}
 
 	// 11. Test Manual Login
-	loginResp, err := pvpnSvc.Login(ctx)
+	loginResp, err := pvpnSvc.Login(ctx, dto.PVPNLoginRequest{})
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -256,5 +256,21 @@ func TestPVPNService(t *testing.T) {
 	}
 	if loginResp.CertExpiresAt <= 0 {
 		t.Errorf("expected positive CertExpiresAt, got %d", loginResp.CertExpiresAt)
+	}
+
+	// 12. Test ImportSession
+	impResp, err := pvpnSvc.ImportSession(ctx, dto.PVPNImportSessionRequest{
+		AccessToken:  "imported_access_token_abc",
+		UID:          "imported_uid_123",
+		WGPrivateKey: "dGVzdF9wcml2YXRlX2tleQ==",
+	})
+	if err != nil {
+		t.Fatalf("ImportSession failed: %v", err)
+	}
+	if !impResp.Success {
+		t.Errorf("expected import success = true")
+	}
+	if impResp.AuthMode != "imported" {
+		t.Errorf("expected AuthMode = imported, got %s", impResp.AuthMode)
 	}
 }

@@ -227,6 +227,7 @@ func (s *Server) setupRoutes() {
 		apiV1.GET("/pvpn/config", s.v1Handler.GetPVPNConfig)
 		apiV1.PUT("/pvpn/config", s.v1Handler.UpdatePVPNConfig)
 		apiV1.POST("/pvpn/login", s.v1Handler.LoginPVPN)
+		apiV1.POST("/pvpn/session", s.v1Handler.ImportPVPNsession)
 		apiV1.GET("/pvpn/countries", s.v1Handler.GetPVPNCountries)
 		apiV1.GET("/pvpn/servers", s.v1Handler.GetPVPNServers)
 		apiV1.POST("/pvpn/connect", s.v1Handler.ConnectPVPN)
