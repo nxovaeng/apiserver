@@ -20,24 +20,26 @@ const ManagedHeader = "# Managed by Xray Panel"
 
 // ConfigGenerator handles generating Nginx configurations.
 type ConfigGenerator struct {
-	configDir   string
-	streamDir   string
-	reloadCmd   string
-	testCmd     string
-	db          *gorm.DB
-	socketDir   string
-	panelListen string
+	configDir        string
+	streamDir        string
+	reloadCmd        string
+	testCmd          string
+	db               *gorm.DB
+	socketDir        string
+	panelListen      string
+	speedtestFileDir string
 }
 
 // NewGenerator creates a new Nginx config generator.
 func NewGenerator(configDir, streamDir string) *ConfigGenerator {
 	return &ConfigGenerator{
-		configDir:   configDir,
-		streamDir:   streamDir,
-		reloadCmd:   "systemctl reload nginx",
-		testCmd:     "nginx -t",
-		socketDir:   "/dev/shm",
-		panelListen: "127.0.0.1:8082",
+		configDir:        configDir,
+		streamDir:        streamDir,
+		reloadCmd:        "systemctl reload nginx",
+		testCmd:          "nginx -t",
+		socketDir:        "/dev/shm",
+		panelListen:      "127.0.0.1:8082",
+		speedtestFileDir: "/var/www/speedtest",
 	}
 }
 
@@ -47,6 +49,19 @@ func (g *ConfigGenerator) ConfigDir() string {
 
 func (g *ConfigGenerator) SetDB(db *gorm.DB) {
 	g.db = db
+}
+
+func (g *ConfigGenerator) SetSpeedtestFileDir(dir string) {
+	if dir != "" {
+		g.speedtestFileDir = dir
+	}
+}
+
+func (g *ConfigGenerator) SpeedtestFileDir() string {
+	if g.speedtestFileDir != "" {
+		return g.speedtestFileDir
+	}
+	return "/var/www/speedtest"
 }
 
 func (g *ConfigGenerator) SetReloadCmd(cmd string) {
@@ -197,11 +212,53 @@ func (g *ConfigGenerator) SpeedtestConfigPath() string {
 
 // WriteSpeedtestConfig renders the speedtest origin server block (serves
 // the 50MB test file under subpath, everything else 404) and writes it as
-// a managed file, then validates the nginx config. Call Reload afterwards
-// to activate it.
-func (g *ConfigGenerator) WriteSpeedtestConfig(domain, subpath, filePath string) error {
-	content := fmt.Sprintf(`server {
+// a managed file, then validates the nginx config. If certPath and keyPath are provided,
+// it configures HTTPS (port 443 ssl with http2) with HTTP-to-HTTPS redirect. Call Reload afterwards.
+func (g *ConfigGenerator) WriteSpeedtestConfig(domain, subpath, filePath, certPath, keyPath string) error {
+	var content string
+	if certPath != "" && keyPath != "" {
+		content = fmt.Sprintf(`server {
     listen 80;
+    listen [::]:80;
+    server_name %s;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name %s;
+
+    ssl_certificate %s;
+    ssl_certificate_key %s;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    gzip off;
+
+    access_log /var/log/nginx/speedtest.access.log;
+    error_log /var/log/nginx/speedtest.error.log;
+
+    location = %s/50mb.bin {
+        alias %s;
+        gzip off;
+        add_header Cache-Control "no-store";
+        add_header Access-Control-Allow-Origin "*";
+    }
+
+    location / {
+        return 404;
+    }
+}
+`, domain, domain, certPath, keyPath, subpath, filePath)
+	} else {
+		content = fmt.Sprintf(`server {
+    listen 80;
+    listen [::]:80;
     server_name %s;
 
     gzip off;
@@ -213,6 +270,7 @@ func (g *ConfigGenerator) WriteSpeedtestConfig(domain, subpath, filePath string)
         alias %s;
         gzip off;
         add_header Cache-Control "no-store";
+        add_header Access-Control-Allow-Origin "*";
     }
 
     location / {
@@ -220,6 +278,7 @@ func (g *ConfigGenerator) WriteSpeedtestConfig(domain, subpath, filePath string)
     }
 }
 `, domain, subpath, filePath)
+	}
 	if err := g.writeConfig(g.SpeedtestConfigPath(), content); err != nil {
 		return err
 	}
@@ -291,6 +350,17 @@ func (g *ConfigGenerator) buildServerBlock(domain string, inbounds []models.Inbo
 			if apiDom != "" && strings.EqualFold(domain, apiDom) {
 				data.ExposeAPI = true
 				data.PanelTarget = g.panelTarget()
+			}
+		}
+		if models.GetSettingValue(g.db, "speedtest_enabled", "false") == "true" {
+			speedDom := strings.TrimSpace(models.GetSettingValue(g.db, "speedtest_domain", ""))
+			if speedDom != "" && strings.EqualFold(domain, speedDom) {
+				subPath := models.GetSettingValue(g.db, "speedtest_subpath", "/speedtest")
+				if !strings.HasPrefix(subPath, "/") {
+					subPath = "/" + subPath
+				}
+				data.SpeedtestSubPath = strings.TrimRight(subPath, "/")
+				data.SpeedtestFilePath = filepath.Join(g.SpeedtestFileDir(), "50mb.bin")
 			}
 		}
 	}
@@ -388,6 +458,17 @@ func (g *ConfigGenerator) SyncEndpointProxies(desired map[string]EndpointProxySp
 			SubPath:     subPath,
 			ExposeAPI:   spec.ExposeAPI,
 			PanelTarget: g.panelTarget(),
+		}
+		if g.db != nil && models.GetSettingValue(g.db, "speedtest_enabled", "false") == "true" {
+			speedDom := strings.TrimSpace(models.GetSettingValue(g.db, "speedtest_domain", ""))
+			if speedDom != "" && strings.EqualFold(spec.Domain, speedDom) {
+				sub := models.GetSettingValue(g.db, "speedtest_subpath", "/speedtest")
+				if !strings.HasPrefix(sub, "/") {
+					sub = "/" + sub
+				}
+				data.SpeedtestSubPath = strings.TrimRight(sub, "/")
+				data.SpeedtestFilePath = filepath.Join(g.SpeedtestFileDir(), "50mb.bin")
+			}
 		}
 
 		var buf bytes.Buffer

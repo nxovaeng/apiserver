@@ -26,6 +26,7 @@ type Handler struct {
 	System    *service.SystemService
 	Tunnels   *service.CFTunnelService
 	Speedtest *service.SpeedtestService
+	PVPN      *service.PVPNService
 }
 
 func respondOK(c *gin.Context, data interface{}) {
@@ -1049,4 +1050,125 @@ func (h *Handler) StreamLogs(c *gin.Context) {
 			}
 		}
 	}
+}
+
+// ===== Proton VPN Wireproxy =====
+
+// GetPVPNStatus handles GET /api/v1/pvpn/status.
+func (h *Handler) GetPVPNStatus(c *gin.Context) {
+	if h.PVPN == nil {
+		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
+		return
+	}
+	res, err := h.PVPN.GetStatus(c.Request.Context())
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// GetPVPNCountries handles GET /api/v1/pvpn/countries.
+func (h *Handler) GetPVPNCountries(c *gin.Context) {
+	if h.PVPN == nil {
+		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
+		return
+	}
+	res, err := h.PVPN.GetCountries(c.Request.Context())
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// GetPVPNServers handles GET /api/v1/pvpn/servers.
+func (h *Handler) GetPVPNServers(c *gin.Context) {
+	if h.PVPN == nil {
+		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
+		return
+	}
+	country := c.Query("country")
+	res, err := h.PVPN.GetServers(c.Request.Context(), country)
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// ConnectPVPN handles POST /api/v1/pvpn/connect.
+func (h *Handler) ConnectPVPN(c *gin.Context) {
+	if h.PVPN == nil {
+		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
+		return
+	}
+	var req dto.PVPNConnectRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, dto.ErrValidation, "无效的连接请求参数", nil)
+		return
+	}
+	res, err := h.PVPN.Connect(c.Request.Context(), req)
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// DisconnectPVPN handles POST /api/v1/pvpn/disconnect.
+func (h *Handler) DisconnectPVPN(c *gin.Context) {
+	if h.PVPN == nil {
+		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
+		return
+	}
+	res, err := h.PVPN.Disconnect(c.Request.Context())
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// PVPNServiceAction handles POST /api/v1/pvpn/service/:action.
+func (h *Handler) PVPNServiceAction(c *gin.Context) {
+	if h.PVPN == nil {
+		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
+		return
+	}
+	action := c.Param("action")
+	res, err := h.PVPN.ServiceAction(c.Request.Context(), action)
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// InstallPVPN handles POST /api/v1/pvpn/install.
+func (h *Handler) InstallPVPN(c *gin.Context) {
+	if h.PVPN == nil {
+		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
+		return
+	}
+	res, err := h.PVPN.Install(c.Request.Context())
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// EnsurePVPNOutbound handles POST /api/v1/pvpn/ensure-outbound.
+func (h *Handler) EnsurePVPNOutbound(c *gin.Context) {
+	if h.PVPN == nil {
+		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
+		return
+	}
+	res, err := h.PVPN.EnsureOutbound(c.Request.Context())
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
 }

@@ -21,23 +21,27 @@ type inboundLocationData struct {
 }
 
 type inboundsTmplData struct {
-	Domain      string
-	HasCert     bool
-	CertPath    string
-	KeyPath     string
-	SubPath     string
-	ExposeAPI   bool
-	PanelTarget string
-	Inbounds    []inboundLocationData
+	Domain            string
+	HasCert           bool
+	CertPath          string
+	KeyPath           string
+	SubPath           string
+	ExposeAPI         bool
+	PanelTarget       string
+	SpeedtestSubPath  string
+	SpeedtestFilePath string
+	Inbounds          []inboundLocationData
 }
 
 type subTmplData struct {
-	Domain      string
-	CertPath    string
-	KeyPath     string
-	SubPath     string
-	ExposeAPI   bool
-	PanelTarget string
+	Domain            string
+	CertPath          string
+	KeyPath           string
+	SubPath           string
+	ExposeAPI         bool
+	PanelTarget       string
+	SpeedtestSubPath  string
+	SpeedtestFilePath string
 }
 
 const panelConfigTmplStr = `server {
@@ -163,6 +167,14 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
+{{end}}{{if .SpeedtestFilePath}}
+    # Speedtest origin 50MB file
+    location = {{.SpeedtestSubPath}}/50mb.bin {
+        alias {{.SpeedtestFilePath}};
+        gzip off;
+        add_header Cache-Control "no-store";
+        add_header Access-Control-Allow-Origin "*";
+    }
 {{end}}
     location / {
         root /var/www/html;
@@ -218,6 +230,14 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+    }
+{{end}}{{if .SpeedtestFilePath}}
+    # Speedtest origin 50MB file
+    location = {{.SpeedtestSubPath}}/50mb.bin {
+        alias {{.SpeedtestFilePath}};
+        gzip off;
+        add_header Cache-Control "no-store";
+        add_header Access-Control-Allow-Origin "*";
     }
 {{end}}
     location / {

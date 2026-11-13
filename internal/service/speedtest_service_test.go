@@ -8,6 +8,7 @@ import (
 
 	"xray-panel-server/internal/database"
 	"xray-panel-server/internal/dto"
+	"xray-panel-server/internal/models"
 	"xray-panel-server/internal/nginx"
 	"xray-panel-server/internal/service"
 )
@@ -142,6 +143,70 @@ func TestSpeedtestValidation(t *testing.T) {
 		}
 		if err == nil {
 			t.Errorf("domain %q must be rejected", bad)
+		}
+	}
+}
+
+func TestSpeedtestHTTPSConfig(t *testing.T) {
+	_, tmpDir := setupSpeedtest(t)
+	db, cfg, _ := setupTestEnv(t)
+	if _, err := database.Seed(db, cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Speedtest.FileDir = filepath.Join(tmpDir, "speedtest")
+	nginxGen := nginx.NewGenerator(filepath.Join(tmpDir, "nginx", "conf.d"), filepath.Join(tmpDir, "nginx", "stream.d"))
+	nginxGen.SetReloadCmd("true")
+	svc := service.NewSpeedtestService(db, cfg, nginxGen)
+
+	certPath := filepath.Join(tmpDir, "test.crt")
+	keyPath := filepath.Join(tmpDir, "test.key")
+	_ = os.WriteFile(certPath, []byte("CERT"), 0644)
+	_ = os.WriteFile(keyPath, []byte("KEY"), 0600)
+
+	// Insert domain with certificate
+	dom := models.Domain{
+		Domain:   "speed.example.com",
+		CertPath: certPath,
+		KeyPath:  keyPath,
+		Enabled:  true,
+	}
+	db.Create(&dom)
+
+	_, err := svc.UpdateSettings(dto.UpdateSpeedtestRequest{
+		Domain:  strPtr("speed.example.com"),
+		SubPath: strPtr("/speedtest"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := svc.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Enabled {
+		t.Fatalf("expected enabled")
+	}
+
+	confPath := filepath.Join(tmpDir, "nginx", "conf.d", "speedtest.conf")
+	confBytes, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confStr := string(confBytes)
+
+	// Verify HTTPS directives
+	for _, expected := range []string{
+		"listen 443 ssl;",
+		"server_name speed.example.com;",
+		"ssl_certificate " + certPath,
+		"ssl_certificate_key " + keyPath,
+		"return 301 https://$host$request_uri;",
+		"location = /speedtest/50mb.bin",
+		"Access-Control-Allow-Origin",
+	} {
+		if !strings.Contains(confStr, expected) {
+			t.Errorf("expected nginx conf to contain %q, but got:\n%s", expected, confStr)
 		}
 	}
 }

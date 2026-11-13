@@ -516,6 +516,37 @@ cmd_status() {
     systemctl status nginx --no-pager -l 2>/dev/null || echo "未安装或未运行"
 }
 
+cmd_install_pvpn() {
+    check_root
+    detect_os
+    info "正在安装 wireproxy (Proton WireGuard -> SOCKS5 代理引擎)..."
+
+    local arch="amd64"
+    local m
+    m="$(uname -m)"
+    if [[ "${m}" == "aarch64" || "${m}" == "arm64" ]]; then
+        arch="arm64"
+    fi
+
+    local wireproxy_version="v1.0.9"
+    local tar_name="wireproxy_linux_${arch}.tar.gz"
+    local dl_url="https://github.com/pufferffish/wireproxy/releases/download/${wireproxy_version}/${tar_name}"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+
+    info "正在从 GitHub 下载 wireproxy ${wireproxy_version} (${arch})..."
+    if curl -fsSL "${dl_url}" -o "${tmp_dir}/${tar_name}"; then
+        tar -xzf "${tmp_dir}/${tar_name}" -C "${tmp_dir}"
+        install -m 755 "${tmp_dir}/wireproxy" /usr/local/bin/wireproxy
+        rm -rf "${tmp_dir}"
+        mkdir -p /opt/xray-panel/proton
+        success "wireproxy 已成功安装至 /usr/local/bin/wireproxy！"
+    else
+        rm -rf "${tmp_dir}"
+        error "下载 wireproxy 失败，请检查网络连接。"
+    fi
+}
+
 print_usage() {
     cat <<'EOF'
 Xray Panel Server 一键安装 / 升级 / 卸载 / 运维脚本
@@ -523,6 +554,7 @@ Xray Panel Server 一键安装 / 升级 / 卸载 / 运维脚本
 
 用法:
   install.sh install [--bin /path/to/xray-panel-server] [--listen 127.0.0.1:8082]
+  install.sh install-pvpn
   install.sh update [--bin /path/to/xray-panel-server]
   install.sh uninstall [--purge]
   install.sh update-geo
@@ -568,6 +600,9 @@ done
 case "${ACTION}" in
     install)
         cmd_install
+        ;;
+    install-pvpn)
+        cmd_install_pvpn
         ;;
     update)
         cmd_update

@@ -149,7 +149,28 @@ func (s *SpeedtestService) ensureTestFile() error {
 
 // applyNginx writes the speedtest server block and reloads nginx.
 func (s *SpeedtestService) applyNginx(domain, subpath string) error {
-	if err := s.nginxGen.WriteSpeedtestConfig(domain, subpath, s.filePath()); err != nil {
+	var certPath, keyPath string
+	var dom models.Domain
+	if err := s.db.Where("domain = ?", domain).First(&dom).Error; err == nil && dom.CertPath != "" && dom.KeyPath != "" {
+		if fileExists(dom.CertPath) && fileExists(dom.KeyPath) {
+			certPath = dom.CertPath
+			keyPath = dom.KeyPath
+		}
+	} else {
+		// Try wildcard match (e.g. *.example.com for jp-speed.example.com)
+		parts := strings.Split(domain, ".")
+		if len(parts) > 2 {
+			wildcard := "*." + strings.Join(parts[1:], ".")
+			if err := s.db.Where("domain = ?", wildcard).First(&dom).Error; err == nil && dom.CertPath != "" && dom.KeyPath != "" {
+				if fileExists(dom.CertPath) && fileExists(dom.KeyPath) {
+					certPath = dom.CertPath
+					keyPath = dom.KeyPath
+				}
+			}
+		}
+	}
+
+	if err := s.nginxGen.WriteSpeedtestConfig(domain, subpath, s.filePath(), certPath, keyPath); err != nil {
 		return err
 	}
 	return s.nginxGen.Reload()

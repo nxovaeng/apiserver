@@ -826,3 +826,68 @@ type SubscriptionJSONResponse struct {
 	Count int                     `json:"count"`
 	User  SubscriptionUserSummary `json:"user"`
 }
+
+// ===== Proton VPN Wireproxy =====
+
+type PVPNStatusResponse struct {
+	Installed      bool   `json:"installed"`
+	ServiceStatus  string `json:"service_status"`
+	Running        bool   `json:"running"`
+	Server         string `json:"server"`
+	Country        string `json:"country"`
+	IP             string `json:"ip"`
+	Port           int    `json:"port"`
+	LoggedIn       bool   `json:"logged_in"`
+	AuthMode       string `json:"auth_mode"`
+	CertExpiresAt  int64  `json:"cert_expires_at"`
+	TotalServers   int    `json:"total_servers"`
+	Tier           int    `json:"tier"`
+	OutboundExists bool   `json:"outbound_exists"`
+	OutboundTag    string `json:"outbound_tag"`
+	APIEndpoint    string `json:"api_endpoint"`
+}
+
+type PVPNCountryDTO struct {
+	Code    string `json:"code"`
+	Name    string `json:"name"`
+	Count   int    `json:"count"`
+	AvgLoad int    `json:"avg_load"`
+}
+
+type PVPNCountriesResponse struct {
+	Countries []PVPNCountryDTO `json:"countries"`
+}
+
+type PVPNServerDTO struct {
+	Name    string  `json:"name"`
+	EntryIP string  `json:"entry_ip"`
+	ExitIP  string  `json:"exit_ip"`
+	Country string  `json:"country"`
+	Tier    int     `json:"tier"`
+	Load    int     `json:"load"`
+	Score   float64 `json:"score"`
+	Status  int     `json:"status"`
+}
+
+type PVPNServersResponse struct {
+	Servers []PVPNServerDTO `json:"servers"`
+}
+
+type PVPNConnectRequest struct {
+	Country        string `json:"country"`
+	Server         string `json:"server,omitempty"`
+	EnsureOutbound bool   `json:"ensure_outbound"`
+}
+
+type PVPNConnectResponse struct {
+	Success     bool   `json:"success"`
+	Server      string `json:"server"`
+	Country     string `json:"country,omitempty"`
+	OutboundTag string `json:"outbound_tag,omitempty"`
+	Message     string `json:"message"`
+}
+
+type PVPNActionResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}

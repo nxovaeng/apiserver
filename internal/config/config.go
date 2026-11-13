@@ -18,6 +18,22 @@ type Config struct {
 	Nginx     NginxConfig     `yaml:"nginx"`
 	Acme      AcmeConfig      `yaml:"acme"`
 	Speedtest SpeedtestConfig `yaml:"speedtest"`
+	PVPN      PVPNConfig      `yaml:"pvpn"`
+}
+
+// PVPNConfig holds Proton VPN wireproxy daemon integration settings.
+type PVPNConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	BinaryPath  string `yaml:"binary_path"`
+	DataDir     string `yaml:"data_dir"`
+	InstallDir  string `yaml:"install_dir"`
+	APIURL      string `yaml:"api_url"`
+	Username    string `yaml:"username"`
+	Password    string `yaml:"password"`
+	SocksHost   string `yaml:"socks_host"`
+	SocksPort   int    `yaml:"socks_port"`
+	ServiceName string `yaml:"service_name"`
+	RepoURL     string `yaml:"repo_url"`
 }
 
 // SpeedtestConfig holds the speedtest origin (test file) location. The file
@@ -144,6 +160,40 @@ func (c *Config) applyDefaults() {
 	if c.Acme.AutoInstall == nil {
 		v := true
 		c.Acme.AutoInstall = &v
+	}
+	if c.PVPN.DataDir == "" {
+		if c.PVPN.InstallDir != "" {
+			c.PVPN.DataDir = c.PVPN.InstallDir
+		} else {
+			c.PVPN.DataDir = "/opt/xray-panel/proton"
+		}
+	}
+	if c.PVPN.BinaryPath == "" {
+		c.PVPN.BinaryPath = "/usr/local/bin/wireproxy"
+	}
+	if c.PVPN.InstallDir == "" {
+		c.PVPN.InstallDir = "/opt/pvpn-wireproxy"
+	}
+	if c.PVPN.APIURL == "" {
+		c.PVPN.APIURL = "http://127.0.0.1:8085"
+	}
+	if c.PVPN.Username == "" {
+		c.PVPN.Username = "admin"
+	}
+	if c.PVPN.Password == "" {
+		c.PVPN.Password = "admin"
+	}
+	if c.PVPN.SocksHost == "" {
+		c.PVPN.SocksHost = "127.0.0.1"
+	}
+	if c.PVPN.SocksPort <= 0 {
+		c.PVPN.SocksPort = 1080
+	}
+	if c.PVPN.ServiceName == "" {
+		c.PVPN.ServiceName = "pvpn-wireproxyd"
+	}
+	if c.PVPN.RepoURL == "" {
+		c.PVPN.RepoURL = "https://github.com/nxovaeng/pvpn-wireproxy.git"
 	}
 }
 

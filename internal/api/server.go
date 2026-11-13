@@ -64,6 +64,7 @@ func NewServer(cfg *config.Config, db *gorm.DB, version string) *Server {
 	dashSvc := service.NewDashboardService(db, sysSvc)
 	subSvc := service.NewSubscriptionService(db)
 	tunnelSvc := service.NewCFTunnelService(db, cfg)
+	pvpnSvc := service.NewPVPNService(db, cfg)
 
 	failLimit := cfg.Auth.FailLimit
 	if failLimit <= 0 {
@@ -103,6 +104,7 @@ func NewServer(cfg *config.Config, db *gorm.DB, version string) *Server {
 			System:    sysSvc,
 			Tunnels:   tunnelSvc,
 			Speedtest: speedtestSvc,
+			PVPN:      pvpnSvc,
 		},
 	}
 
@@ -219,6 +221,16 @@ func (s *Server) setupRoutes() {
 		apiV1.POST("/tunnels/cf/install", s.v1Handler.InstallCFTunnel)
 		apiV1.POST("/tunnels/cf/setup", s.v1Handler.SetupCFTunnel)
 		apiV1.POST("/tunnels/cf/service/:action", s.v1Handler.CFTunnelServiceAction)
+
+		// Proton VPN Wireproxy
+		apiV1.GET("/pvpn/status", s.v1Handler.GetPVPNStatus)
+		apiV1.GET("/pvpn/countries", s.v1Handler.GetPVPNCountries)
+		apiV1.GET("/pvpn/servers", s.v1Handler.GetPVPNServers)
+		apiV1.POST("/pvpn/connect", s.v1Handler.ConnectPVPN)
+		apiV1.POST("/pvpn/disconnect", s.v1Handler.DisconnectPVPN)
+		apiV1.POST("/pvpn/service/:action", s.v1Handler.PVPNServiceAction)
+		apiV1.POST("/pvpn/install", s.v1Handler.InstallPVPN)
+		apiV1.POST("/pvpn/ensure-outbound", s.v1Handler.EnsurePVPNOutbound)
 
 		// WireGuard
 		apiV1.GET("/wireguard/status", s.v1Handler.GetWGStatus)
