@@ -215,4 +215,46 @@ func TestPVPNService(t *testing.T) {
 	if obDTO.Port != 1080 {
 		t.Errorf("expected obDTO.Port = 1080, got %d", obDTO.Port)
 	}
+
+	// 9. Test GetConfig
+	cfgResp, err := pvpnSvc.GetConfig(ctx)
+	if err != nil {
+		t.Fatalf("GetConfig failed: %v", err)
+	}
+	if cfgResp.SocksPort != 1080 {
+		t.Errorf("expected SocksPort = 1080, got %d", cfgResp.SocksPort)
+	}
+	if cfgResp.SessionPath == "" {
+		t.Errorf("expected non-empty SessionPath")
+	}
+
+	// 10. Test UpdateConfig (change port to 1088)
+	updResp, err := pvpnSvc.UpdateConfig(ctx, dto.PVPNConfigRequest{SocksPort: 1088})
+	if err != nil {
+		t.Fatalf("UpdateConfig failed: %v", err)
+	}
+	if updResp.SocksPort != 1088 {
+		t.Errorf("expected updated SocksPort = 1088, got %d", updResp.SocksPort)
+	}
+
+	// Verify DB outbound updated
+	obAfter, err := pvpnSvc.EnsureOutbound(ctx)
+	if err != nil {
+		t.Fatalf("EnsureOutbound after port update failed: %v", err)
+	}
+	if obAfter.Port != 1088 {
+		t.Errorf("expected obAfter.Port = 1088, got %d", obAfter.Port)
+	}
+
+	// 11. Test Manual Login
+	loginResp, err := pvpnSvc.Login(ctx)
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+	if !loginResp.Success {
+		t.Errorf("expected login success = true")
+	}
+	if loginResp.CertExpiresAt <= 0 {
+		t.Errorf("expected positive CertExpiresAt, got %d", loginResp.CertExpiresAt)
+	}
 }

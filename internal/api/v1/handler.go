@@ -1172,3 +1172,50 @@ func (h *Handler) EnsurePVPNOutbound(c *gin.Context) {
 	}
 	respondOK(c, res)
 }
+
+// GetPVPNConfig handles GET /api/v1/pvpn/config.
+func (h *Handler) GetPVPNConfig(c *gin.Context) {
+	if h.PVPN == nil {
+		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
+		return
+	}
+	res, err := h.PVPN.GetConfig(c.Request.Context())
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// UpdatePVPNConfig handles PUT /api/v1/pvpn/config.
+func (h *Handler) UpdatePVPNConfig(c *gin.Context) {
+	if h.PVPN == nil {
+		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
+		return
+	}
+	var req dto.PVPNConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondServiceError(c, service.NewValidationError("无效的配置请求参数: "+err.Error()))
+		return
+	}
+	res, err := h.PVPN.UpdateConfig(c.Request.Context(), req)
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}
+
+// LoginPVPN handles POST /api/v1/pvpn/login.
+func (h *Handler) LoginPVPN(c *gin.Context) {
+	if h.PVPN == nil {
+		respondServiceError(c, service.NewInternalError("PVPN service not configured", nil))
+		return
+	}
+	res, err := h.PVPN.Login(c.Request.Context())
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	respondOK(c, res)
+}

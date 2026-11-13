@@ -845,6 +845,7 @@ type PVPNStatusResponse struct {
 	OutboundExists bool   `json:"outbound_exists"`
 	OutboundTag    string `json:"outbound_tag"`
 	APIEndpoint    string `json:"api_endpoint"`
+	SessionPath    string `json:"session_path,omitempty"`
 }
 
 type PVPNCountryDTO struct {
@@ -890,4 +891,24 @@ type PVPNConnectResponse struct {
 type PVPNActionResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+}
+
+type PVPNConfigRequest struct {
+	SocksPort int `json:"socks_port" binding:"required,min=1,max=65535"`
+}
+
+type PVPNConfigResponse struct {
+	SocksPort   int    `json:"socks_port"`
+	SocksHost   string `json:"socks_host"`
+	DataDir     string `json:"data_dir"`
+	SessionPath string `json:"session_path"`
+	Message     string `json:"message,omitempty"`
+}
+
+type PVPNLoginResponse struct {
+	Success       bool   `json:"success"`
+	Message       string `json:"message"`
+	CertExpiresAt int64  `json:"cert_expires_at"`
+	AuthMode      string `json:"auth_mode"`
+	SessionPath   string `json:"session_path,omitempty"`
 }

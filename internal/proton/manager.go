@@ -93,6 +93,33 @@ func (m *Manager) GetSocksHost() string {
 	return m.cfg.SocksHost
 }
 
+func (m *Manager) GetSessionPath() string {
+	return filepath.Join(m.cfg.DataDir, SessionFileName)
+}
+
+func (m *Manager) HasValidSession() bool {
+	sess, err := m.LoadSession()
+	return err == nil && sess != nil && sess.AccessToken != ""
+}
+
+// SetSocksPort dynamically updates the SOCKS5 listen port.
+// If wireproxy is currently running, it re-renders the configuration and restarts wireproxy.
+func (m *Manager) SetSocksPort(ctx context.Context, port int) error {
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("invalid port: %d (must be between 1 and 65535)", port)
+	}
+
+	m.mu.Lock()
+	m.cfg.SocksPort = port
+	activeSrv := m.activeSrv
+	m.mu.Unlock()
+
+	if m.IsRunning() && activeSrv != nil {
+		return m.Start(ctx, activeSrv)
+	}
+	return nil
+}
+
 // LocateWireproxy finds the wireproxy executable.
 func (m *Manager) LocateWireproxy() (string, error) {
 	var candidates []string
@@ -270,6 +297,35 @@ func (m *Manager) EnsureValidSession(ctx context.Context) (*Session, error) {
 	}
 
 	return sess, nil
+}
+
+// ForceLoginGuest performs an explicit fresh guest login and issues a new 24-hour certificate.
+func (m *Manager) ForceLoginGuest(ctx context.Context) (*Session, error) {
+	newSess, err := m.client.LoginGuest(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("guest login failed: %w", err)
+	}
+	if err := m.client.RegisterCertificate(ctx, newSess); err != nil {
+		return nil, fmt.Errorf("register certificate failed: %w", err)
+	}
+	if err := m.SaveSession(newSess); err != nil {
+		return nil, fmt.Errorf("save session failed: %w", err)
+	}
+
+	// Refresh server list in background or synchronously
+	_, _ = m.RefreshServers(ctx)
+
+	// Hot-reload wireproxy if running
+	if m.IsRunning() {
+		m.mu.RLock()
+		activeSrv := m.activeSrv
+		m.mu.RUnlock()
+		if activeSrv != nil {
+			_ = m.Start(ctx, activeSrv)
+		}
+	}
+
+	return newSess, nil
 }
 
 func (m *Manager) loadCachedServers() []Server {

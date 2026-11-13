@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"gorm.io/gorm"
@@ -52,6 +53,13 @@ func NewPVPNService(db *gorm.DB, cfg *config.Config) *PVPNService {
 	socksHost := "127.0.0.1"
 	socksPort := 1080
 
+	if db != nil {
+		val := models.GetSettingValue(db, "pvpn_socks_port", "")
+		if p, err := strconv.Atoi(val); err == nil && p > 0 {
+			socksPort = p
+		}
+	}
+
 	if cfg != nil {
 		if strings.TrimSpace(cfg.PVPN.DataDir) != "" {
 			dataDir = strings.TrimSpace(cfg.PVPN.DataDir)
@@ -64,7 +72,7 @@ func NewPVPNService(db *gorm.DB, cfg *config.Config) *PVPNService {
 		if strings.TrimSpace(cfg.PVPN.SocksHost) != "" {
 			socksHost = strings.TrimSpace(cfg.PVPN.SocksHost)
 		}
-		if cfg.PVPN.SocksPort > 0 {
+		if socksPort == 1080 && cfg.PVPN.SocksPort > 0 {
 			socksPort = cfg.PVPN.SocksPort
 		}
 	}
@@ -100,6 +108,12 @@ func (s *PVPNService) SetManager(m *proton.Manager) {
 }
 
 func (s *PVPNService) getSocksPort() int {
+	if s.db != nil {
+		val := models.GetSettingValue(s.db, "pvpn_socks_port", "")
+		if p, err := strconv.Atoi(val); err == nil && p > 0 {
+			return p
+		}
+	}
 	if s.manager != nil {
 		return s.manager.GetSocksPort()
 	}
@@ -129,6 +143,13 @@ func (s *PVPNService) GetStatus(ctx context.Context) (*dto.PVPNStatusResponse, e
 		srvName = "None"
 	}
 
+	loggedIn := false
+	sessionPath := ""
+	if s.manager != nil {
+		loggedIn = s.manager.HasValidSession()
+		sessionPath = s.manager.GetSessionPath()
+	}
+
 	res := &dto.PVPNStatusResponse{
 		Installed:      installed,
 		ServiceStatus:  svcStatus,
@@ -137,12 +158,13 @@ func (s *PVPNService) GetStatus(ctx context.Context) (*dto.PVPNStatusResponse, e
 		Country:        activeCC,
 		IP:             exitIP,
 		Port:           s.getSocksPort(),
-		LoggedIn:       true,
+		LoggedIn:       loggedIn,
 		AuthMode:       "guest",
 		CertExpiresAt:  certExp,
 		OutboundExists: false,
 		OutboundTag:    "proton",
 		APIEndpoint:    "internal://proton-engine",
+		SessionPath:    sessionPath,
 	}
 
 	// Check if proton outbound exists in DB
@@ -325,6 +347,97 @@ func (s *PVPNService) Install(ctx context.Context) (*dto.PVPNActionResponse, err
 	return &dto.PVPNActionResponse{
 		Success: true,
 		Message: fmt.Sprintf("wireproxy 二进制已成功部署就绪: %s", binPath),
+	}, nil
+}
+
+// GetConfig returns current Proton Wireproxy configuration.
+func (s *PVPNService) GetConfig(ctx context.Context) (*dto.PVPNConfigResponse, error) {
+	port := s.getSocksPort()
+	host := "127.0.0.1"
+	dataDir := "/opt/xray-panel/proton"
+	sessionPath := ""
+	if s.manager != nil {
+		host = s.manager.GetSocksHost()
+		dataDir = s.manager.GetDataDir()
+		sessionPath = s.manager.GetSessionPath()
+	}
+
+	return &dto.PVPNConfigResponse{
+		SocksPort:   port,
+		SocksHost:   host,
+		DataDir:     dataDir,
+		SessionPath: sessionPath,
+	}, nil
+}
+
+// UpdateConfig updates the Proton WireProxy configuration (such as SOCKS5 port).
+func (s *PVPNService) UpdateConfig(ctx context.Context, req dto.PVPNConfigRequest) (*dto.PVPNConfigResponse, error) {
+	if req.SocksPort <= 0 || req.SocksPort > 65535 {
+		return nil, NewValidationError("端口号必须在 1 到 65535 之间")
+	}
+
+	// 1. Update setting in database
+	if s.db != nil {
+		var setting models.Setting
+		if err := s.db.WithContext(ctx).Where("key = ?", "pvpn_socks_port").First(&setting).Error; err != nil {
+			setting = models.Setting{
+				Key:    "pvpn_socks_port",
+				Value:  strconv.Itoa(req.SocksPort),
+				Type:   "int",
+				Remark: "Proton Wireproxy SOCKS5 listen port",
+			}
+			if err := s.db.WithContext(ctx).Create(&setting).Error; err != nil {
+				return nil, NewInternalError("保存端口配置失败", err)
+			}
+		} else {
+			setting.Value = strconv.Itoa(req.SocksPort)
+			if err := s.db.WithContext(ctx).Save(&setting).Error; err != nil {
+				return nil, NewInternalError("更新端口配置失败", err)
+			}
+		}
+	}
+
+	// 2. Update manager & hot reload wireproxy if running
+	if s.manager != nil {
+		if err := s.manager.SetSocksPort(ctx, req.SocksPort); err != nil {
+			return nil, NewSystemCommandError("更新 WireProxy 端口失败: "+err.Error(), err)
+		}
+	}
+
+	// 3. Update outbound in DB if tag=proton exists
+	if s.db != nil {
+		var outbound models.Outbound
+		if err := s.db.WithContext(ctx).Where("tag = ?", "proton").First(&outbound).Error; err == nil && outbound.ID != "" {
+			outbound.Port = req.SocksPort
+			_ = s.db.WithContext(ctx).Save(&outbound)
+		}
+	}
+
+	res, err := s.GetConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res.Message = fmt.Sprintf("已成功更新 Proton SOCKS5 端口为 %d", req.SocksPort)
+	return res, nil
+}
+
+// Login triggers an explicit fresh guest login, fetches a 24h certificate, and refreshes nodes.
+func (s *PVPNService) Login(ctx context.Context) (*dto.PVPNLoginResponse, error) {
+	if s.manager == nil {
+		return nil, NewInternalError("Proton 引擎未就绪", nil)
+	}
+
+	sess, err := s.manager.ForceLoginGuest(ctx)
+	if err != nil {
+		return nil, NewSystemCommandError("Proton 访客登录失败: "+err.Error(), err)
+	}
+
+	return &dto.PVPNLoginResponse{
+		Success:       true,
+		Message:       "已成功获取最新 Proton 访客凭据与 24 小时 WireGuard 证书",
+		CertExpiresAt: sess.CertExpiresAt,
+		AuthMode:      sess.AuthMode,
+		SessionPath:   s.manager.GetSessionPath(),
 	}, nil
 }
 

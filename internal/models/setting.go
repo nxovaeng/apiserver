@@ -43,6 +43,7 @@ func DefaultSettings() []Setting {
 		{Key: "speedtest_enabled", Value: "false", Type: "bool", Remark: "Speedtest origin enabled (serves the 50MB test file via nginx)"},
 		{Key: "speedtest_domain", Value: "", Type: "string", Remark: "Speedtest subdomain served by nginx (e.g. jp-speed.example.com)"},
 		{Key: "speedtest_subpath", Value: "/speedtest", Type: "string", Remark: "URL subpath of the test file (change it to avoid a guessable address)"},
+		{Key: "pvpn_socks_port", Value: "1080", Type: "int", Remark: "Proton Wireproxy SOCKS5 listen port"},
 		{Key: "monthly_net_baseline_sent", Value: "", Type: "int", Remark: "OS net bytes sent at start of current month"},
 		{Key: "monthly_net_baseline_recv", Value: "", Type: "int", Remark: "OS net bytes received at start of current month"},
 		{Key: "monthly_net_baseline_month", Value: "", Type: "string", Remark: "Month of the current baseline (YYYY-MM)"},
