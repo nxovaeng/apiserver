@@ -7,10 +7,10 @@ import (
 
 const (
 	SpoofedAppVersion       = "5.18.75.1"
-	SpoofedModel            = "Pixel 9"
+	SpoofedModel            = "Pixel 6"
 	SpoofedManufacturer     = "Google"
-	SpoofedAndroidVersion   = "14"
-	SpoofedUserAgent        = "PVPN/5.18.75.1 (Android 14; Google Pixel 9)"
+	SpoofedAndroidVersion   = "12"
+	SpoofedUserAgent        = "PVPN/5.18.75.1 (Android 12; Google Pixel 6)"
 	SpoofedAppVersionHeader = "android-vpn@5.18.75.1-dev+play"
 	ProtonAPIBaseURL        = "https://vpn-api.proton.me"
 )
