@@ -261,6 +261,7 @@ func TestPVPNService(t *testing.T) {
 	// 12. Test ImportSession
 	impResp, err := pvpnSvc.ImportSession(ctx, dto.PVPNImportSessionRequest{
 		AccessToken:  "imported_access_token_abc",
+		RefreshToken: "imported_refresh_token_xyz",
 		UID:          "imported_uid_123",
 		WGPrivateKey: "dGVzdF9wcml2YXRlX2tleQ==",
 	})

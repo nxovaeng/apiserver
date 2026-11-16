@@ -1,16 +1,15 @@
 package proton
 
 import (
-	"os"
-	"strings"
+	"github.com/google/uuid"
 )
 
 const (
 	SpoofedAppVersion       = "5.18.75.1"
-	SpoofedModel            = "Pixel 6"
+	SpoofedModel            = "Pixel 9"
 	SpoofedManufacturer     = "Google"
-	SpoofedAndroidVersion   = "12"
-	SpoofedUserAgent        = "PVPN/5.18.75.1 (Android 12; Google Pixel 6)"
+	SpoofedAndroidVersion   = "14"
+	SpoofedUserAgent        = "PVPN/5.18.75.1 (Android 14; Google Pixel 9)"
 	SpoofedAppVersionHeader = "android-vpn@5.18.75.1-dev+play"
 	ProtonAPIBaseURL        = "https://vpn-api.proton.me"
 )
@@ -24,19 +23,10 @@ func JavaStringHashCode(s string) int32 {
 	return h
 }
 
-// GetDeviceHash generates a deterministic device hash based on machine-id / hostname.
+// GetDeviceHash generates a realistic, random device hash based on UUID to prevent device fingerprint pooling.
 func GetDeviceHash() int32 {
-	machineID := ""
-	if data, err := os.ReadFile("/etc/machine-id"); err == nil && len(strings.TrimSpace(string(data))) > 0 {
-		machineID = strings.TrimSpace(string(data))
-	} else if data, err := os.ReadFile("/var/lib/dbus/machine-id"); err == nil && len(strings.TrimSpace(string(data))) > 0 {
-		machineID = strings.TrimSpace(string(data))
-	} else if h, err := os.Hostname(); err == nil && len(strings.TrimSpace(h)) > 0 {
-		machineID = strings.TrimSpace(h)
-	} else {
-		machineID = "nextvpn-pixel-9"
-	}
-	return JavaStringHashCode(machineID)
+	u := uuid.New().String()
+	return JavaStringHashCode(u)
 }
 
 // BuildChallengePayload builds the vpn-android-v4-challenge-0 challenge JSON payload required by Proton API.

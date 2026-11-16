@@ -284,18 +284,33 @@ func (m *Manager) EnsureValidSession(ctx context.Context) (*Session, error) {
 	needsRenew := sess.WGPrivateKey == "" || sess.CertExpiresAt == 0 || (sess.CertExpiresAt-now) < 7200
 	if needsRenew {
 		if err := m.client.RegisterCertificate(ctx, sess); err != nil {
-			// Renewal failed, session might be invalid; retry full guest login
-			newSess, loginErr := m.client.LoginGuest(ctx)
-			if loginErr != nil {
-				return nil, fmt.Errorf("certificate renew & re-login failed: %w (login: %v)", err, loginErr)
+			// Renewal failed (e.g. AccessToken expired). Try refreshing token if RefreshToken is present
+			renewed := false
+			if sess.RefreshToken != "" {
+				if rErr := m.client.RefreshSession(ctx, sess); rErr == nil {
+					_ = m.SaveSession(sess)
+					if cErr := m.client.RegisterCertificate(ctx, sess); cErr == nil {
+						renewed = true
+					}
+				}
 			}
-			if err := m.client.RegisterCertificate(ctx, newSess); err != nil {
-				return nil, fmt.Errorf("register certificate on fresh session failed: %w", err)
+			if !renewed {
+				// Retry full guest login as fallback if not an imported session
+				if sess.AuthMode == "guest" {
+					newSess, loginErr := m.client.LoginGuest(ctx)
+					if loginErr != nil {
+						return nil, fmt.Errorf("certificate renew & re-login failed: %w (login: %v)", err, loginErr)
+					}
+					if err := m.client.RegisterCertificate(ctx, newSess); err != nil {
+						return nil, fmt.Errorf("register certificate on fresh session failed: %w", err)
+					}
+					if err := m.SaveSession(newSess); err != nil {
+						return nil, fmt.Errorf("save fresh session failed: %w", err)
+					}
+					return newSess, nil
+				}
+				return nil, fmt.Errorf("certificate renew failed: %w", err)
 			}
-			if err := m.SaveSession(newSess); err != nil {
-				return nil, fmt.Errorf("save fresh session failed: %w", err)
-			}
-			return newSess, nil
 		}
 		_ = m.SaveSession(sess)
 	}
@@ -367,7 +382,15 @@ func (m *Manager) ImportSession(ctx context.Context, sess *Session) error {
 	now := time.Now().Unix()
 	if sess.WGPrivateKey == "" || sess.CertExpiresAt == 0 || (sess.CertExpiresAt-now) < 60 {
 		if err := m.client.RegisterCertificate(ctx, sess); err != nil {
-			return fmt.Errorf("register certificate on imported session failed: %w", err)
+			// If 401 or expired, attempt token refresh if RefreshToken is provided
+			if sess.RefreshToken != "" {
+				if rErr := m.client.RefreshSession(ctx, sess); rErr == nil {
+					err = m.client.RegisterCertificate(ctx, sess)
+				}
+			}
+			if err != nil {
+				return fmt.Errorf("使用凭据向 Proton 签发 WireGuard 证书失败: %w", err)
+			}
 		}
 	}
 
@@ -440,12 +463,19 @@ func (m *Manager) RefreshServers(ctx context.Context) ([]Server, error) {
 	srvs, err := m.client.FetchServers(ctx, sess)
 	if err != nil {
 		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "expired") {
-			// Session expired, re-login once
-			newSess, err2 := m.client.LoginGuest(ctx)
-			if err2 == nil {
-				_ = m.client.RegisterCertificate(ctx, newSess)
-				_ = m.SaveSession(newSess)
-				srvs, err = m.client.FetchServers(ctx, newSess)
+			// Session expired, attempt refresh using RefreshToken
+			if sess.RefreshToken != "" {
+				if rErr := m.client.RefreshSession(ctx, sess); rErr == nil {
+					_ = m.SaveSession(sess)
+					srvs, err = m.client.FetchServers(ctx, sess)
+				}
+			} else if sess.AuthMode == "guest" {
+				newSess, err2 := m.client.LoginGuest(ctx)
+				if err2 == nil {
+					_ = m.client.RegisterCertificate(ctx, newSess)
+					_ = m.SaveSession(newSess)
+					srvs, err = m.client.FetchServers(ctx, newSess)
+				}
 			}
 		}
 	}

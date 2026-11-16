@@ -466,6 +466,11 @@ func (s *PVPNService) ImportSession(ctx context.Context, req dto.PVPNImportSessi
 		return nil, NewValidationError("access_token 不能为空")
 	}
 
+	refreshToken := strings.TrimSpace(req.RefreshToken)
+	if refreshToken == "" {
+		return nil, NewValidationError("refresh_token 不能为空（Proton 会话需要 refresh_token 用于静默自动刷新，保证长期稳定有效）")
+	}
+
 	uid := strings.TrimSpace(req.UID)
 	if uid == "" {
 		uid = token
@@ -473,7 +478,7 @@ func (s *PVPNService) ImportSession(ctx context.Context, req dto.PVPNImportSessi
 
 	sess := &proton.Session{
 		AccessToken:   token,
-		RefreshToken:  strings.TrimSpace(req.RefreshToken),
+		RefreshToken:  refreshToken,
 		UID:           uid,
 		UserID:        strings.TrimSpace(req.UserID),
 		WGPrivateKey:  strings.TrimSpace(req.WGPrivateKey),

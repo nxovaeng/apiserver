@@ -296,6 +296,60 @@ func (c *Client) RegisterCertificate(ctx context.Context, session *Session) erro
 	return nil
 }
 
+// RefreshSession uses session.RefreshToken to renew the AccessToken and RefreshToken via Proton API.
+func (c *Client) RefreshSession(ctx context.Context, session *Session) error {
+	if session == nil || session.RefreshToken == "" {
+		return fmt.Errorf("refresh token is required")
+	}
+
+	refreshPayload := map[string]string{
+		"ResponseType": "token",
+		"GrantType":    "refresh_token",
+		"RefreshToken": session.RefreshToken,
+		"RedirectURI":  "https://protonvpn.com",
+	}
+
+	extraHeaders := map[string]string{
+		"x-pm-uid": session.UID,
+	}
+
+	respBytes, err := c.doRequest(ctx, http.MethodPost, "/auth/v4/refresh", session, refreshPayload, extraHeaders)
+	if err != nil {
+		return fmt.Errorf("session refresh request failed: %w", err)
+	}
+
+	var res struct {
+		Code         int    `json:"Code"`
+		Error        string `json:"Error"`
+		AccessToken  string `json:"AccessToken"`
+		RefreshToken string `json:"RefreshToken"`
+		UID          string `json:"UID"`
+		UserID       string `json:"UserID"`
+	}
+	if err := json.Unmarshal(respBytes, &res); err != nil {
+		return fmt.Errorf("parse refresh response failed: %w", err)
+	}
+	if res.Code != 1000 {
+		return fmt.Errorf("session refresh failed (Code %d): %s", res.Code, res.Error)
+	}
+
+	if res.AccessToken != "" {
+		session.AccessToken = res.AccessToken
+	}
+	if res.RefreshToken != "" {
+		session.RefreshToken = res.RefreshToken
+	}
+	if res.UID != "" {
+		session.UID = res.UID
+	}
+	if res.UserID != "" {
+		session.UserID = res.UserID
+	}
+	session.UpdatedAt = time.Now().Unix()
+
+	return nil
+}
+
 // FetchServers fetches logical servers and their loads from Proton VPN.
 func (c *Client) FetchServers(ctx context.Context, session *Session) ([]Server, error) {
 	// 1. Fetch servers
