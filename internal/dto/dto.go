@@ -894,7 +894,8 @@ type PVPNActionResponse struct {
 }
 
 type PVPNConfigRequest struct {
-	SocksPort int `json:"socks_port" binding:"required,min=1,max=65535"`
+	SocksPort   int    `json:"socks_port" binding:"required,min=1,max=65535"`
+	APIProxyURL string `json:"api_proxy_url,omitempty"`
 }
 
 type PVPNConfigResponse struct {
@@ -902,11 +903,13 @@ type PVPNConfigResponse struct {
 	SocksHost   string `json:"socks_host"`
 	DataDir     string `json:"data_dir"`
 	SessionPath string `json:"session_path"`
+	APIProxyURL string `json:"api_proxy_url,omitempty"`
 	Message     string `json:"message,omitempty"`
 }
 
 type PVPNLoginRequest struct {
 	CaptchaToken string `json:"captcha_token,omitempty"`
+	APIProxyURL  string `json:"api_proxy_url,omitempty"`
 }
 
 type PVPNImportSessionRequest struct {

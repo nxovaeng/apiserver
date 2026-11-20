@@ -367,6 +367,35 @@ func (m *Manager) ForceLoginGuest(ctx context.Context, captchaToken string) (*Se
 	return newSess, nil, nil
 }
 
+// ForceLoginGuestWithProxy performs guest login via a specified API proxy URL (e.g. Deno proxy) to bypass datacenter IP CAPTCHA.
+func (m *Manager) ForceLoginGuestWithProxy(ctx context.Context, proxyURL, captchaToken string) (*Session, *CaptchaChallenge, error) {
+	proxyURL = strings.TrimSpace(proxyURL)
+	origURL := m.client.GetBaseURL()
+	if proxyURL != "" {
+		m.client.SetBaseURL(proxyURL)
+	}
+	defer func() {
+		if proxyURL != "" {
+			m.client.SetBaseURL(origURL)
+		}
+	}()
+
+	return m.ForceLoginGuest(ctx, captchaToken)
+}
+
+func (m *Manager) GetClientBaseURL() string {
+	if m.client != nil {
+		return m.client.GetBaseURL()
+	}
+	return ProtonAPIBaseURL
+}
+
+func (m *Manager) SetClientBaseURL(u string) {
+	if m.client != nil {
+		m.client.SetBaseURL(u)
+	}
+}
+
 // ImportSession writes a pre-configured or externally obtained session to disk and activates it.
 func (m *Manager) ImportSession(ctx context.Context, sess *Session) error {
 	if sess == nil || sess.AccessToken == "" {

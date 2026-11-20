@@ -38,6 +38,23 @@ func (c *Client) SetHTTPClient(hc *http.Client) {
 	}
 }
 
+// SetBaseURL overrides or updates the Proton API base URL (e.g. to route via Deno edge proxy).
+func (c *Client) SetBaseURL(baseURL string) {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		baseURL = ProtonAPIBaseURL
+	}
+	c.baseURL = strings.TrimRight(baseURL, "/")
+}
+
+// GetBaseURL returns the currently configured Proton API base URL.
+func (c *Client) GetBaseURL() string {
+	if c.baseURL == "" {
+		return ProtonAPIBaseURL
+	}
+	return c.baseURL
+}
+
 // CaptchaChallenge holds details when Proton API requires human verification.
 type CaptchaChallenge struct {
 	Code      int      `json:"code"`

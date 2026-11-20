@@ -363,11 +363,26 @@ func (s *PVPNService) GetConfig(ctx context.Context) (*dto.PVPNConfigResponse, e
 		sessionPath = s.manager.GetSessionPath()
 	}
 
+	proxyURL := ""
+	if s.db != nil {
+		var setting models.Setting
+		if err := s.db.WithContext(ctx).Where("key = ?", "pvpn_api_proxy_url").First(&setting).Error; err == nil {
+			proxyURL = strings.TrimSpace(setting.Value)
+		}
+	}
+	if proxyURL == "" && s.manager != nil {
+		u := s.manager.GetClientBaseURL()
+		if u != proton.ProtonAPIBaseURL {
+			proxyURL = u
+		}
+	}
+
 	return &dto.PVPNConfigResponse{
 		SocksPort:   port,
 		SocksHost:   host,
 		DataDir:     dataDir,
 		SessionPath: sessionPath,
+		APIProxyURL: proxyURL,
 	}, nil
 }
 
@@ -396,6 +411,22 @@ func (s *PVPNService) UpdateConfig(ctx context.Context, req dto.PVPNConfigReques
 				return nil, NewInternalError("更新端口配置失败", err)
 			}
 		}
+
+		// Update proxy URL if provided or modified
+		proxyVal := strings.TrimSpace(req.APIProxyURL)
+		var proxySetting models.Setting
+		if err := s.db.WithContext(ctx).Where("key = ?", "pvpn_api_proxy_url").First(&proxySetting).Error; err != nil {
+			proxySetting = models.Setting{
+				Key:    "pvpn_api_proxy_url",
+				Value:  proxyVal,
+				Type:   "string",
+				Remark: "Proton API Proxy URL (e.g. Deno proxy)",
+			}
+			_ = s.db.WithContext(ctx).Create(&proxySetting)
+		} else {
+			proxySetting.Value = proxyVal
+			_ = s.db.WithContext(ctx).Save(&proxySetting)
+		}
 	}
 
 	// 2. Update manager & hot reload wireproxy if running
@@ -418,18 +449,26 @@ func (s *PVPNService) UpdateConfig(ctx context.Context, req dto.PVPNConfigReques
 	if err != nil {
 		return nil, err
 	}
-	res.Message = fmt.Sprintf("已成功更新 Proton SOCKS5 端口为 %d", req.SocksPort)
+	res.Message = fmt.Sprintf("已成功更新 Proton 配置 (SOCKS5 端口: %d)", req.SocksPort)
 	return res, nil
 }
 
 // Login triggers an explicit fresh guest login, fetches a 24h certificate, and refreshes nodes.
-// If Proton API triggers human verification (CAPTCHA), it returns the verification WebUrl and token.
+// If req.APIProxyURL is provided, it uses the API proxy to bypass datacenter IP CAPTCHA.
 func (s *PVPNService) Login(ctx context.Context, req dto.PVPNLoginRequest) (*dto.PVPNLoginResponse, error) {
 	if s.manager == nil {
 		return nil, NewInternalError("Proton 引擎未就绪", nil)
 	}
 
-	sess, challenge, err := s.manager.ForceLoginGuest(ctx, strings.TrimSpace(req.CaptchaToken))
+	proxyURL := strings.TrimSpace(req.APIProxyURL)
+	if proxyURL == "" && s.db != nil {
+		var setting models.Setting
+		if err := s.db.WithContext(ctx).Where("key = ?", "pvpn_api_proxy_url").First(&setting).Error; err == nil {
+			proxyURL = strings.TrimSpace(setting.Value)
+		}
+	}
+
+	sess, challenge, err := s.manager.ForceLoginGuestWithProxy(ctx, proxyURL, strings.TrimSpace(req.CaptchaToken))
 	if err != nil {
 		return nil, NewSystemCommandError("Proton 访客登录失败: "+err.Error(), err)
 	}
